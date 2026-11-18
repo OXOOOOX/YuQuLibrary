@@ -1,0 +1,126 @@
+{
+  "asr": {
+    "repo": "Qwen/Qwen3-ASR-0.6B-hf",
+    "huggingfaceRevision": "7f1569a48a89f3e3f4dc3a5c9d28bddd903bc76c",
+    "downloadProvider": "ModelScope official Qwen mirror",
+    "license": "Apache-2.0",
+    "files": [
+      {
+        "Path": "README.md",
+        "Revision": "005b749cd1566dc579fe0238316087e2fc1945c0",
+        "Sha256": "742006d0f99ce6475b1c5e7b66e4a2f166cce836dd7ce3d7f20707252859195a",
+        "Size": 16538
+      },
+      {
+        "Path": "chat_template.jinja",
+        "Revision": "005b749cd1566dc579fe0238316087e2fc1945c0",
+        "Sha256": "f50e6b694fbf4a683206e37869990d68333fe95d285730f084c838a34b0d98c2",
+        "Size": 1434
+      },
+      {
+        "Path": "config.json",
+        "Revision": "c4650525d0d40f32f1517abe624a89be04386bef",
+        "Sha256": "9eecf6f1b383e343889c2e6010e632590fa57d4bc678e151c7d6a160a0dfb04a",
+        "Size": 2398
+      },
+      {
+        "Path": "configuration.json",
+        "Revision": "c4650525d0d40f32f1517abe624a89be04386bef",
+        "Sha256": "0657e261c850f8d368b4da948a15279089f3484d40c152cc07fb4e9d1727ca3d",
+        "Size": 63
+      },
+      {
+        "Path": "generation_config.json",
+        "Revision": "c4650525d0d40f32f1517abe624a89be04386bef",
+        "Sha256": "9939fc9388b79bd70757f938b87381e817173d6a6158f5af6506c0b73e775c3c",
+        "Size": 165
+      },
+      {
+        "Path": "model.safetensors",
+        "Revision": "c4650525d0d40f32f1517abe624a89be04386bef",
+        "Sha256": "d3f212dd20abecd315d830bc54ae3865e56ebfc3276484e57b771288ba27fd35",
+        "Size": 1564928088
+      },
+      {
+        "Path": "processor_config.json",
+        "Revision": "c4650525d0d40f32f1517abe624a89be04386bef",
+        "Sha256": "bc0b230081b44e629dd5b9045b78495615c1831b4b9f4cffe97bd37e82a6156a",
+        "Size": 487
+      },
+      {
+        "Path": "tokenizer.json",
+        "Revision": "c4650525d0d40f32f1517abe624a89be04386bef",
+        "Sha256": "fe1fad59be22a41ee293363fcf95fdedbc7c93f3b49270b1d2e18bd1399a7a05",
+        "Size": 11429653
+      },
+      {
+        "Path": "tokenizer_config.json",
+        "Revision": "c4650525d0d40f32f1517abe624a89be04386bef",
+        "Sha256": "945e980986de2ca7768f3326bfdbb4fbea3406f972b8ae0be233089f2b253c11",
+        "Size": 998
+      }
+    ],
+    "sourceUrl": "https://modelscope.cn/models/Qwen/Qwen3-ASR-0.6B-hf",
+    "referenceUrl": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf",
+    "revisionMeaning": "Output revision is a SHA-256 fingerprint of sorted (Path,Sha256) pairs; each file Revision below is the official mirror Git revision."
+  },
+  "aligner": {
+    "repo": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
+    "huggingfaceRevision": "c07281df297b9905d24a508279258cccf987a064",
+    "downloadProvider": "ModelScope official Qwen mirror",
+    "license": "Apache-2.0",
+    "files": [
+      {
+        "Path": "README.md",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "30de8315ece609b239c719539336b99188a2a92aef89a1fdcd60b11e40abd063",
+        "Size": 9419
+      },
+      {
+        "Path": "chat_template.jinja",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "59b5ae119bda7c00089bba5f49af775791ea67c7aeb7d2b828cddda9463121bf",
+        "Size": 551
+      },
+      {
+        "Path": "config.json",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "82ac390b36a8f80c5a0c4e202367debd149e5d8c30abe4cf5eed439101b1c5ce",
+        "Size": 248029
+      },
+      {
+        "Path": "configuration.json",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "0657e261c850f8d368b4da948a15279089f3484d40c152cc07fb4e9d1727ca3d",
+        "Size": 63
+      },
+      {
+        "Path": "model.safetensors",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "00568245ceca5af1991d28562a75fe1ddc9bfeb041c27fda66947ea05c47fb86",
+        "Size": 1835545960
+      },
+      {
+        "Path": "processor_config.json",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "bc0b230081b44e629dd5b9045b78495615c1831b4b9f4cffe97bd37e82a6156a",
+        "Size": 487
+      },
+      {
+        "Path": "tokenizer.json",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "cadfb9cbd9ff8f4e309075ec6a71b063295ff796afb4b5dbc0fd2873fbb301f2",
+        "Size": 11429842
+      },
+      {
+        "Path": "tokenizer_config.json",
+        "Revision": "053506a54ad1c9deea6105050330d7c500b9f098",
+        "Sha256": "945e980986de2ca7768f3326bfdbb4fbea3406f972b8ae0be233089f2b253c11",
+        "Size": 998
+      }
+    ],
+    "sourceUrl": "https://modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B-hf",
+    "referenceUrl": "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf",
+    "revisionMeaning": "Output revision is a SHA-256 fingerprint of sorted (Path,Sha256) pairs; each file Revision below is the official mirror Git revision."
+  }
+}

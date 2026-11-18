@@ -1,0 +1,8 @@
+{
+  "modelVersion": "26.0.0",
+  "name": "yuqu-library-harmony",
+  "version": "0.1.0",
+  "description": "鱼趣知识库鸿蒙播放验证工程",
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -1,0 +1,123 @@
+name: yuqu
+
+services:
+  postgres:
+    image: ${PG_IMAGE:?set PG_IMAGE to a verified immutable PostgreSQL 18 image digest}
+    restart: unless-stopped
+    env_file:
+      - path: /opt/yuqu/shared/postgres.env
+        format: raw
+    environment:
+      PGDATA: /var/lib/postgresql/18/docker
+    volumes:
+      - /opt/yuqu/shared/postgres:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:55433:5432"
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  app:
+    image: ${YUQU_IMAGE:?set YUQU_IMAGE to the immutable built YuQu image tag}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        NODE_IMAGE: ${YUQU_NODE_IMAGE:?set YUQU_NODE_IMAGE to a verified immutable Node 24 image digest}
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    working_dir: /app/apps/web
+    env_file:
+      - path: /opt/yuqu/shared/runtime.env
+        format: raw
+    environment:
+      NODE_ENV: production
+      YUQU_ORIGIN: https://fish.sdspeed.com.cn
+      MEDIA_STORAGE_DIR: /data/media
+      ENABLE_PLAYBACK_PROBE: "0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4210:3000"
+    volumes:
+      - /opt/yuqu/shared/media:/data/media
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp
+      - /app/apps/web/.next/cache
+    mem_limit: 512m
+    healthcheck:
+      # This is a process/HTTP liveness check only.  /api/health does not
+      # assert database, SMTP, Bridge, worker or migration readiness.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  ingestion:
+    image: ${YUQU_IMAGE:?set YUQU_IMAGE to the immutable built YuQu image tag}
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    working_dir: /app
+    command: ["node", "workers/ingestion/run.mjs"]
+    env_file:
+      - path: /opt/yuqu/shared/runtime.env
+        format: raw
+    environment:
+      NODE_ENV: production
+      MEDIA_STORAGE_DIR: /data/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - /opt/yuqu/shared/media:/data/media
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  migrate:
+    profiles: [tools]
+    image: ${YUQU_IMAGE:?set YUQU_IMAGE to the immutable built YuQu image tag}
+    user: "1000:1000"
+    working_dir: /app
+    command: ["node", "scripts/migrate.mjs"]
+    env_file:
+      - path: /opt/yuqu/shared/runtime.env
+        format: raw
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    restart: "no"

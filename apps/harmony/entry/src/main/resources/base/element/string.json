@@ -1,0 +1,7 @@
+{
+  "string": [
+    { "name": "module_description", "value": "播客收听、文稿与 AI 问答" },
+    { "name": "ability_description", "value": "手机与网页同步收听和提问" },
+    { "name": "reason_background", "value": "用于锁屏及切换应用后继续播放用户主动开启的音频" }
+  ]
+}

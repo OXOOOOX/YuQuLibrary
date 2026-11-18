@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import vm from 'node:vm';
+import ts from 'typescript';
+const source=(await readFile(new URL('../apps/harmony/entry/src/main/ets/services/PlaybackService.ets',import.meta.url),'utf8')).replace(/^import .*;$/gm,'');
+const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
+const deferred=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j;});return {promise,resolve,reject};};
+const settle=async()=>{for(let i=0;i<50;i++)await Promise.resolve();};
+function create(){
+ const players=[],sessions=[],sources=[],logs=[];let nextPlan={},starts=0,stops=0,opened=0,closed=0;
+ class Player{constructor(plan){this.plan=plan;this.state='idle';this.duration=plan.duration??240000;this.handlers={};this.plays=0;this.seeks=[];this.released=false;players.push(this);}on(k,f){this.handlers[k]=f;}off(k){delete this.handlers[k];}emit(k,...a){this.handlers[k]?.(...a);}change(s){this.state=s;this.emit('stateChange',s);}set fdSrc(v){this.duration=120000;this.change('initialized');}setMediaSource(src,strategy){assert.ok(strategy);this.source=src;if(this.plan.fail)return Promise.reject(new Error('Authorization test-secret and '+src.url));this.change('initialized');return this.plan.promiseSource ? Promise.resolve() : undefined;}async prepare(){if(this.plan.prepare)await this.plan.prepare.promise;this.change('prepared');}async play(){this.plays++;if(this.plan.play)await this.plan.play.promise;this.change('playing');}async pause(){this.change('paused');}seek(p){this.seeks.push(p);this.emit('seekDone',p);}setSpeed(v){this.emit('speedDone',v);}async release(){this.released=true;this.state='released';}}
+ class Session{handlers={};on(k,f){this.handlers[k]=f;}off(k){delete this.handlers[k];}async setLaunchAbility(){}async activate(){}async deactivate(){}async destroy(){}async setAVMetadata(v){this.metadata=v;}async setAVPlaybackState(v){this.playback=v;}}
+ const context={exports:{},Date,Math,Error,Promise,JSON,Number,setTimeout,clearTimeout,encodeURIComponent,
+ media:{createAVPlayer:async()=>{const p=new Player(nextPlan);nextPlan={};return p;},createMediaSourceWithUrl:(url,headers)=>{const src={url,headers};sources.push(src);return src;},SeekMode:{SEEK_CLOSEST:0},PlaybackSpeed:{SPEED_FORWARD_1_00_X:1,SPEED_FORWARD_1_25_X:1.25,SPEED_FORWARD_1_50_X:1.5,SPEED_FORWARD_2_00_X:2},BufferingInfoType:{BUFFERING_START:1,BUFFERING_END:2}},
+ audio:{StreamUsage:{STREAM_USAGE_MUSIC:1},InterruptMode:{SHARE_MODE:1},InterruptHint:{INTERRUPT_HINT_PAUSE:1,INTERRUPT_HINT_STOP:2,INTERRUPT_HINT_RESUME:3},AudioStreamDeviceChangeReason:{REASON_OLD_DEVICE_UNAVAILABLE:1}},
+ wantAgent:{OperationType:{START_ABILITY:1},WantAgentFlags:{UPDATE_PRESENT_FLAG:1},getWantAgent:async()=>({})},
+ avSession:{createAVSession:async()=>{const s=new Session();sessions.push(s);return s;},PlaybackState:{PLAYBACK_STATE_PAUSE:1,PLAYBACK_STATE_PLAY:2,PLAYBACK_STATE_STOP:3}},
+ backgroundTaskManager:{BackgroundMode:{AUDIO_PLAYBACK:1},startBackgroundRunning:async()=>{starts++;},stopBackgroundRunning:async()=>{stops++;}},
+ hilog:{error:(...a)=>logs.push(a.join(' '))}};
+ vm.runInNewContext(compiled,context);const player=context.exports.PlaybackService.getInstance();
+ const ability={abilityInfo:{bundleName:'test',name:'EntryAbility'},resourceManager:{getRawFd:async()=>{opened++;return {fd:1,offset:0,length:100};},closeRawFd:async()=>{closed++;}}};
+ return {player,players,sessions,sources,logs,ability,setPlan:p=>nextPlan=p,counts:()=>({starts,stops,opened,closed})};
+}
+const checks=[];
+{
+ const e=create();await e.player.initialize(e.ability);assert.equal(e.player.getSnapshot().ready,true);await e.player.loadMedia('content-a','media-a','A','http://127.0.0.1:3000','test-secret');assert.equal(e.sources[0].url,'http://127.0.0.1:3000/api/media/media-a');assert.equal(e.sources[0].headers.Authorization,'Bearer test-secret');assert.equal(e.player.getSnapshot().mediaVersionId,'media-a');assert.equal(e.player.getSnapshot().durationMs,240000);assert.equal(e.sessions.at(-1).metadata.title,'A');assert.equal(JSON.stringify(e.player.getSnapshot()).includes('test-secret'),false);
+ let allowed=true;e.player.setPlaybackPermission(()=>allowed);await e.player.play();await e.player.pause();const p=e.players.at(-1);const count=p.plays;allowed=false;e.sessions.at(-1).handlers.play();await settle();assert.equal(p.plays,count);allowed=true;e.sessions.at(-1).handlers.play();await settle();assert.equal(p.plays,count+1);await e.player.pause();
+ p.emit('bufferingUpdate',1,0);assert.equal(e.player.getSnapshot().buffering,true);p.emit('bufferingUpdate',2,0);assert.equal(e.player.getSnapshot().buffering,false);const oldSeek=e.player.seek(55000);await e.player.loadMedia('content-b','media-b','B','http://127.0.0.1:3000','test-secret');await oldSeek;assert.equal(e.players.at(-1).seeks.length,0);assert.equal(e.player.getSnapshot().positionMs,0);await e.player.loadFixture();assert.equal(e.player.getSnapshot().mediaVersionId,'fixture-pcm-v1');assert.equal(e.player.sourceToken,'');assert.equal(e.player.sourceUrl,'');checks.push('real service uses same-origin Bearer MediaSource; IDs/title/duration, card permissions, buffering, queued old seek cancellation and private-source cleanup');await e.player.release();
+}
+{
+ const e=create();await e.player.initialize(e.ability);const gate=deferred();e.setPlan({prepare:gate,promiseSource:true});const oldLoad=e.player.loadMedia('content-a','media-a','A','http://127.0.0.1:3000','test-secret').catch(x=>x);await settle();const oldPlayer=e.players.at(-1);const lateTime=oldPlayer.handlers.timeUpdate,lateState=oldPlayer.handlers.stateChange;const fresh=e.player.loadMedia('content-b','media-b','B','http://127.0.0.1:3000','test-secret');await fresh;assert.ok(await oldLoad instanceof Error);gate.resolve();await settle();lateTime(199999);lateState('playing');assert.equal(e.player.getSnapshot().mediaVersionId,'media-b');assert.equal(e.player.getSnapshot().positionMs,0);assert.equal(e.player.getSnapshot().playerState,'prepared');assert.equal(oldPlayer.released,true);checks.push('A prepare canceled by B; late A prepare/time/state callbacks cannot overwrite B or play');await e.player.release();
+}
+{
+ const e=create();await e.player.initialize(e.ability);e.setPlan({fail:true});await assert.rejects(e.player.loadMedia('content-a','media-a','A','https://fish.example.test','test-secret'));assert.equal(e.player.getSnapshot().ready,false);assert.equal(JSON.stringify(e.player.getSnapshot()).includes('test-secret'),false);assert.equal(e.logs.join('').includes('test-secret'),false);checks.push('loadMedia rejects failed setMediaSource and strips private network error details from UI/logs');await e.player.release();
+}
+console.log(JSON.stringify({passed:true,checks},null,2));

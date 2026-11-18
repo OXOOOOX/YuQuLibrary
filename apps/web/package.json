@@ -1,0 +1,26 @@
+{
+  "name": "@yuqu/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node ../../scripts/dev-web.mjs",
+    "dev:lan": "node ../../scripts/dev-web.mjs --lan",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@yuqu/contracts": "0.1.0",
+    "@yuqu/domain": "^0.1.0",
+    "next": "16.4.6",
+    "nodemailer": "^10.6.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^8.0.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0"
+  }
+}

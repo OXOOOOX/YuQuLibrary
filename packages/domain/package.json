@@ -1,0 +1,27 @@
+{
+  "name": "@yuqu/domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./sse": "./src/sse.ts",
+    "./auth": "./src/auth.ts",
+    "./playback": "./src/playback.ts",
+    "./errors": "./src/errors.ts",
+    "./validation": "./src/validation.ts",
+    "./library": "./src/library.ts",
+    "./remote": "./src/remote.ts",
+    "./transcripts": "./src/transcripts.ts",
+    "./chat": "./src/chat.ts",
+    "./bilibili": "./src/bilibili.ts",
+    "./storage": "./src/storage.ts",
+    "./knowledge": "./src/knowledge.ts",
+    "./chapters": "./src/chapters.ts",
+    "./summaries": "./src/summaries.ts"
+  },
+  "dependencies": {
+    "fast-xml-parser": "5.12.1",
+    "ipaddr.js": "2.5.0",
+    "music-metadata": "12.5.0"
+  }
+}

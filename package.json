@@ -1,0 +1,44 @@
+{
+  "name": "yuqu-library",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "npm@11.12.1",
+  "workspaces": [
+    "apps/web",
+    "packages/*",
+    "workers/*"
+  ],
+  "scripts": {
+    "dev": "npm run fixtures:generate && npm run dev --workspace @yuqu/web",
+    "build": "npm run fixtures:generate && npm run build --workspace @yuqu/web",
+    "start": "npm run start --workspace @yuqu/web",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @yuqu/web",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "test:integration": "node --env-file-if-exists=.env --test --test-concurrency=1 tests/*.integration.test.mjs",
+    "check:config": "node scripts/check-config.mjs",
+    "check": "npm run check:config && npm run typecheck && npm test && npm run build",
+    "fixtures:generate": "node scripts/generate-audio-fixture.mjs",
+    "harmony:doctor": "node scripts/harmony-doctor.mjs",
+    "harmony:build": "node scripts/build-harmony.mjs",
+    "db:migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
+    "mail:inbox": "node scripts/mail-inbox.mjs",
+    "worker:ingestion": "node --env-file-if-exists=.env workers/ingestion/run.mjs",
+    "asr:transcribe": "node --env-file-if-exists=.env scripts/transcribe-local.mjs",
+    "worker:transcription": "node --env-file-if-exists=.env workers/transcription/run.mjs",
+    "worker:transcription:remote": "node --env-file=.local/production/asr.env workers/transcription/remote.mjs",
+    "asr:service": "node scripts/asr-service.mjs"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/pg": "8.23.1",
+    "json5": "2.2.3",
+    "typescript": "6.0.2"
+  }
+}

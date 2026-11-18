@@ -1,0 +1,17 @@
+{
+  "color": [
+    { "name": "start_window_background", "value": "#FAFAFA" },
+    { "name": "yuqu_page", "value": "#FAFAFA" },
+    { "name": "yuqu_surface", "value": "#FFFFFF" },
+    { "name": "yuqu_subtle", "value": "#F3F3F3" },
+    { "name": "yuqu_ink", "value": "#262626" },
+    { "name": "yuqu_muted", "value": "#686868" },
+    { "name": "yuqu_line", "value": "#E5E5E5" },
+    { "name": "yuqu_accent", "value": "#8DBCE0" },
+    { "name": "yuqu_accent_soft", "value": "#F0F7FC" },
+    { "name": "yuqu_accent_ink", "value": "#365D7B" },
+    { "name": "yuqu_primary", "value": "#262626" },
+    { "name": "yuqu_on_primary", "value": "#FFFFFF" },
+    { "name": "yuqu_danger", "value": "#9F3C31" }
+  ]
+}

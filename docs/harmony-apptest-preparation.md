@@ -1,5 +1,28 @@
 # 鱼趣知识库：AppTest 真机分发准备
 
+## 2026-11-19 发布候选
+
+鱼趣知识库已用配套的 DevEco Command Line Tools 26.0.0.865 和 SDK 26.0.0.105 Release 重新构建。应用为 `com.yuqu.library`，沿用 `0.1.0 / 1000000`，APP ID 为 `6917622039742660061`。本次交付到本地未签名包阶段。
+
+| 交付项 | 位置或核对结果 |
+| --- | --- |
+| DevEco 上传时选择的工程产物 | `apps/harmony/build/outputs/default/harmony-default-unsigned.app` |
+| 本机留档 | `out/apptest/2026-11-19-697c8dc/`，含 APP、配套符号表、两个尺寸的图标、校验清单和检查日志 |
+| 未签名 APP | 335,496 字节，SHA-256 `0ce97ed583055e22f1f53d3900f3005ec1ede453d4a5dfe6491410aeeb3acddc` |
+| 包内核验 | 外层和内层均声明正式 Release API。内层 `module.json` 为 `buildMode=release`、`debug=false`、编译 SDK `26.0.0.105`。手机和平板最低及目标 API 均为 26 |
+| 项目检查 | 42 个配置解析通过、类型检查通过、183 项测试通过、网页生产构建通过。默认检查跳过 72 项测试；鸿蒙另行执行了实际 Release APP 构建 |
+| 正式服务 | 从公网匿名访问，健康接口返回 200，隐私页返回 200 且存在反馈邮箱与数据权利章节，资料列表返回 401 |
+
+### 从候选包到手机安装
+
+1. 登录华为开发者中心，选择上述鱼趣 APP ID，核对已发布版本、可用邀请渠道及群组成员。11 月 17 日最后一次后台实查中，旧 AppGallery 草稿绑定了 Beta 包 `build 1`，仅含本人，提交时触发 Beta API 提示后仍为“准备提交”。11 月 19 日打开开发者中心时要求重新登录，当前 AppTest 开通情况与后台版本待复核。[历史后台记录](verification/apptest-preparation.md#云签名上传后实际提交)
+2. 在正式版 DevEco Studio 打开 `apps/harmony`，依次选择 **Build → Upload Product → Testing Only**，选取上表工程产物，核对团队、包名后云签名上传。本机已验证正式版命令行工具链，并已找到华为签名有效的同版 Windows IDE 安装程序。上传向导只列工程 `build/outputs` 下的软件包。重签后记录实际构建号、上传时间和检测结果，再选新包。[华为构建与云签名说明](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-publish-app/)
+3. 按本轮目标使用 **AppTest 客户端**。如果鱼趣已切换到 AppTest，在该渠道新建邀请测试版本并核对仅本人参与，旧 AppGallery 草稿中的文案和素材可供填写。若入口仍未开放，可使用已备好的开通申请；既有 AppGallery 草稿继续保留。11 月 17 日草稿测试期为 11 月 18 日至 12 月 2 日，新建时按实际提交日设置有效时间。[AppTest 开通与流程](https://developer.huawei.com/consumer/cn/doc/app/agc-help-apptest-invite-test-guide-0000002258174270/) · [切换测试渠道的要求](https://developer.huawei.com/consumer/cn/doc/app/agc-help-invite-test-faq-0000002363660365/) · [填报资料及工单备稿](apptest-submission-materials.md)
+4. 发布生效且到达测试时间后，在 API 26 或更高版本的手机上使用受邀华为账号打开 AppTest 安装。先验证邮箱登录、手机与网页同步、引用回听，再验证锁屏、切网、来电及耳机断开。新版包的平台检测、测试分发和真机体验均待验证。
+
+<details>
+<summary>2026-11-17 首次准备过程（历史 Beta 包）</summary>
+
 核对日期：2026-11-17。目标：手机暂时不能连接 USB 时，通过邀请测试安装鱼趣测试版。当前沿用 AppGallery 外部群组，仅邀请本人；AppTest 开通工单暂缓。
 
 AppTest 可以让手机通过测试邀请安装应用，不必走 USB 安装流程。本轮已创建鱼趣应用身份并保存邀请测试资料草稿；当前后台仅显示外部测试群组，没有 AppTest 内部测试入口。用户已建立仅含本人的外部群组，可先走 AppGallery 邀请测试；证书、软件包上传及测试发布尚未完成。实际后台状态及可复制文本见[填报资料](apptest-submission-materials.md)。[华为 AppTest 流程](https://developer.huawei.com/consumer/cn/doc/App/agc-help-apptest-invite-test-guide-0000002258174270/)
@@ -74,3 +97,5 @@ AppTest 可以让手机通过测试邀请安装应用，不必走 USB 安装流�
 云签名是签名管理方式，不会自动替代 AppTest 开通、应用身份确认、版本检测或外部测试审核。[云管理证书与传统证书比较](https://developer.huawei.com/consumer/cn/doc/app/agc-help-cloud-cert-0000002572233173/)、[自动调试签名](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-signing-auto/)
 
 用户现已创建外部群组并加入本人，可以沿用 AppGallery 邀请测试，经发布后从应用市场“应用尝鲜”安装。下一步完成签名上传、关联群组与测试提交；AppTest 工单暂缓。当前未通过平台软件包检测，未在真机运行。最新实际状态以[填报资料](apptest-submission-materials.md)为准。
+
+</details>

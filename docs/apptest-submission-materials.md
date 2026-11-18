@@ -1,8 +1,8 @@
 # 鱼趣知识库 AppTest 填报资料
 
-更新：2026-11-17。目标为先向本人分发测试版。Beta 包已由用户在 DevEco 云签名并上传，平台合法性显示“已达标”；已关联仅含本人的外部群组。但点击提交审核时被 Beta API 警告阻断，重新进入列表仍为“准备提交”，尚未发布测试。正在准备正式版工具链重新构建。
+更新于 2026-11-19。本次准备通过 AppTest 向本人分发。正式版 SDK 的候选包已完成本机构建和包内核验，等待云签名与平台检测。[候选包及提交步骤](harmony-apptest-preparation.md)
 
-## 本轮后台实查结果
+## 2026-11-17 后台实查记录
 
 - 用户扫码登录并自行同意了华为后台要求的新版协议，主账号显示已认证。
 - 已创建 APP ID `6917622039742660061`，项目 `YuQuLibrary`，包名 `com.yuqu.library`，手机、简体中文、应用类型为 HarmonyOS 应用。
@@ -27,8 +27,8 @@
 | 隐私政策网址 | `https://fish.sdspeed.com.cn/privacy`，已发布并验证公网 200 |
 | 隐私权利网址 | `https://fish.sdspeed.com.cn/privacy#data-rights` |
 | 用户反馈与数据申请邮箱 | `fish_sdspeed@163.com`，用户已确认公开并处理申请 |
-| 当前测试群组 | 测试用户群组-1；外部群组，仅本人 1 位用户 |
-| 测试开始与结束时间 | 草稿已设 2026-11-18 00:00:00 至 2026-12-02 00:00:00；若提交延后需调整，尚未发布 |
+| 测试范围 | 仅本人。11 月 17 日的 AppGallery 草稿使用“测试用户群组-1”，当时为 1 人；AppTest 提交时复核实际成员 |
+| 测试开始与结束时间 | 旧草稿为 2026-11-18 00:00 至 2026-12-02 00:00（北京时间）。AppTest 新版本按实际提交时间填写 |
 
 ## 应用介绍
 
@@ -50,28 +50,30 @@
 4. 查看文稿、提出问题、查看引用并从引用位置回听。
 5. 锁屏和切换应用后继续收听，检查来电或耳机断开后的表现。
 6. 使用专门的测试资料验证清理音频和整期删除；删除无法撤销。
+7. 在有文稿的资料中按关键词搜索，打开章节或总结，核对引用原文和回听起点，并检查收藏能否在另一端找到。
 
 发现问题请联系 fish_sdspeed@163.com，说明手机型号、系统版本、操作步骤和发生时间。不要提交密码或验证码。真机后台、省电策略和长时间收听仍待本轮测试验证。
 
 ## 登录与审核备注
 
-本应用通过邮箱验证码登录，没有账号密码登录或通用测试验证码。初次勾选“需要登录进行审核”时，平台提示需要用户名和密码；用户自行补资料后已取消该勾选，并保留备注说明审核人员可使用可收件邮箱获取验证码，首次登录自动创建账号。保留用户调整，不填写虚构密码或加入认证绕过。“下一步”当前仅提示软件包缺失，但最终审核是否接受这种登录说明仍待验证。
+可复制备注：请使用可以收件的邮箱获取登录验证码。首次验证成功会创建鱼趣账号，之后使用同一邮箱即可在手机和网页同步收听进度、文稿及对话。
+
+历史 AppGallery 草稿由本人取消了账号密码审核选项并保留上述登录说明。AppTest 对此登录方式的审核结果待确认。
 
 ## 素材与软件包
 
 - 图标来源：`apps/harmony/AppScope/resources/base/media/app_icon.svg`。
 - 已导出 `%USERPROFILE%/Documents/Codex/2026-11-17/yuqu-stage12/assets/yuqu-icon-216.png` 与 `yuqu-icon-1024.png`。两者均为 PNG，分别 216×216、1024×1024，小于 3 MB。
-- 当前 Release `.app`：`%USERPROFILE%/Documents/Codex/2026-11-17/yuqu-stage12/yuqu-0.1.0-apptest-beta-unsigned.app`。
+- 11 月 19 日正式 SDK 的包、符号表和两份图标位于本仓库 `out/apptest/2026-11-19-697c8dc/`。其中 `manifest.json` 记录本次未签名包的 SHA-256、SDK 和权限。
 - DevEco 上传应选择工程 `apps/harmony/build/outputs/default/harmony-default-unsigned.app`，由 Testing Only 流程重新签名。
 - 图标已上传并保存到测试草稿；尚未准备对外展示截图。官方通用手机截图规格为 3–10 张、1080×1920 竖屏或 1920×1080 横屏，PNG/JPG/JPEG 不超过 5 MB。当前邀请测试草稿尚未显示截图必填项，不将通用素材要求推定为本轮已遇到的门槛。[素材规范](https://developer.huawei.com/consumer/cn/doc/app/agc-help-app-visual-asset-spec-0000002277607976/)
 
 ## 仍需真实后台或本人信息
 
-- 本应用 AppTest 内部测试入口尚未出现；申请属于新增/切换分发能力，不是当前 AppGallery 外部邀请测试的前提。当前可继续软件包签名上传、补资料并按平台流程提交测试。
+- 11 月 19 日开发者中心要求重新登录。登录后核对当前 AppTest 入口；若应用已经切换，应在 AppTest 新建邀请测试版本。
 - 负责人真实姓名、电话已由本人在华为页面填写并完成短信验证；文档不记录私人手机号。
 - 核对测试手机完整系统版本。工程最低 API 26，不能仅凭“OS 7”判断兼容。
-- 当前工具链为 Studio 26.0.1.290 / SDK 26.0.1.120 Beta1。本地 Release 编译和模拟器安装成功，不等于 AppTest 已接收。官方 Beta 说明限制正式应用市场上架，另有特定 Beta 邀请测试政策；本版本是否可参加 AppTest 要以后台检测与对应政策为准，不能泛化成允许或禁止。[26.0.1 说明](https://developer.huawei.com/consumer/cn/doc/harmonyos-releases/overview-2601/)、[官方 Beta 邀请测试示例](https://developer.huawei.com/consumer/cn/activity/developerbeta/harmonyos-developer-beta-6-5/)
-- 若平台要求稳定工具链，可评估并行安装 Studio 26.0.0.865 Release 与 SDK 26.0.0.105 Release 后重新构建，保持 API 26 下限；尚未执行该安装或重建。[26.0.0 配套版本](https://developer.huawei.com/consumer/cn/doc/harmonyos-releases/overview-2600/)
+- 重签后核对新包实际构建号、合法性检测、测试提交状态与测试时间。旧 Beta 包在 11 月 17 日取得的检测结果只适用于该历史上传。
 
 ## 暂缓发送的支持申请备稿
 
@@ -83,14 +85,12 @@
 
 应用名称：鱼趣知识库；APP ID：6917622039742660061；包名：com.yuqu.library。
 
-当前“测试用户”页面只有外部测试用户群组，未看到 AppTest 内部测试群组入口。请协助确认是否需要开通，并告知所需步骤。
-
-另请确认：DevEco Studio 26.0.1.290 / SDK 26.0.1.120 Beta1 构建的 API 26 测试包能否通过 AppTest 分发；若不支持，是否应改用 26.0.0 Release 工具链构建。
+11 月 17 日查看“测试用户”时，页面只显示外部测试用户群组。我们已用正式版 SDK 26.0.0.105 构建 API 26 候选包。请协助确认此应用的 AppTest 开通情况及后续步骤。
 
 开发者 ID：发送前从账号后台核实填写，不把菜单 ID 或项目 ID 当作开发者 ID。当前仅准备申请文本，尚未发送。
 
-工单入口：https://developer.huawei.com/consumer/cn/support/feedback/ 。当前选择沿用 AppGallery 外部群组，工单暂缓。若后续切换 AppTest 或发生需支持处理的平台问题，再根据实际问题更新此备稿。
+若后台仍无入口，可补齐开发者 ID 后使用上述备稿，本轮仅准备材料。[华为支持工单](https://developer.huawei.com/consumer/cn/support/feedback/)
 
-## 当前安装路线
+## 测试版安装入口
 
 AppGallery 邀请测试版本经平台流程发布后，可通过分享链接打开华为应用市场“应用尝鲜”获取；AppTest 则通过 AppTest 客户端领取。二者均可只邀请本人。若后续切换 AppTest，按官方 FAQ 重新创建邀请测试版本，不能直接假定本轮 AppGallery 草稿可以复用。[AppGallery 发布与分享](https://developer.huawei.com/consumer/cn/doc/App/agc-help-appgallery-release-testapp-0000002258174266/)、[测试方式对比](https://developer.huawei.com/consumer/cn/doc/app/agc-help-invite-test-overview-0000002287701773/)、[切换 FAQ](https://developer.huawei.com/consumer/cn/doc/app/agc-help-invite-test-faq-0000002363660365/)

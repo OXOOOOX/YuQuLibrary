@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-2026-11-18 本地完善已实现固定提问位置、选段与追问、全文关键词搜索、轻量收藏／备注、回听恢复、AI 章节导航、长节目检索问答，以及分段与整期总结。本轮总结升级为约 5 分钟分段、每段最多 12 个要点，再按主题保留全部已生成叶要点，按需分页阅读并展开冻结原文；旧结果可显式重新整理且保留原依据。主题分组的完整性由服务端校验，叶要点是否遗漏原文主题、每点引用是否完整支持陈述仍须内容审计。本轮固定长教程 12 个主题全部覆盖，141 个叶要点完整归组；此前短样本漏引与补充／纠正回归通过，网页及鸿蒙模拟器主题分页、实际回听均完成。仍保留 ASR 歧义和多人自然内容待验边界，尚未部署。详见[开发计划](docs/development-plan.md)、[主题覆盖与引用完整性验证](docs/verification/summary-coverage.md)、[上一轮真实内容复验](docs/verification/summary-quality.md)和[候选发布流程](docs/release-candidate.md)。
+2026-11-19，网页与 API 已上线固定位置提问、选段与追问、全文搜索、收藏和备注、引用回听、AI 章节、整期检索和分段／整期总结。主题总结支持展开要点查看冻结原文。鸿蒙客户端已完成灰度与浅蓝界面调整，固定输入框、引用面板和资料库通过模拟器验证，新版手机包仍待签名和分发。详见[生产升级记录](docs/deployment.md)和[主题覆盖验证](docs/verification/summary-coverage.md)。
 
 已上线网页与鸿蒙引用回听：展开原文保持播放不变，点击按钮才在当前设备从引用起点播放，草稿与原问题位置保留。真实生产鸿蒙引用 9.280 秒的起播事件已核对。首轮固定公开标注转写质量评测已完成，仍发现漏词、同音字及短重复，不能宣布准确率达标。见[本轮验证](docs/verification/citation-replay-signing.md)与[质量基线](docs/verification/asr-quality-baseline.md)。测试分发 Release `.app` 已构建，隐私页已上线，应用身份与测试资料草稿已在华为后台创建，尚未云签名、上传或发布；用户已建立仅含本人的外部测试群组，见[分发准备](docs/harmony-apptest-preparation.md)、[填报资料](docs/apptest-submission-materials.md)和[验证记录](docs/verification/apptest-preparation.md)。
 

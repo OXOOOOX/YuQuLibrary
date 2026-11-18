@@ -20,6 +20,7 @@ install -d -o root -g root -m 0755 "$trusted" "$home" "$home/.ssh"
 exec 8>/opt/yuqu/shared/release.lock
 flock -w 600 8
 for f in ssh-entry request deploy-main.sh; do install -o root -g root -m 0755 "$here/$f" "$trusted/$f"; done
+install -o root -g root -m 0644 "$here/stage-source.py" "$trusted/stage-source.py"
 install -o root -g root -m 0755 "$here/../upgrade-schema.sh" "$trusted/upgrade-schema.sh"
 install -o root -g root -m 0644 "$here/../compose.yaml" "$trusted/compose.yaml"
 policy=$(mktemp)

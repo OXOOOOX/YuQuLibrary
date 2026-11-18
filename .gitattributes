@@ -3,3 +3,4 @@
 *.sh text eol=lf
 deploy/automation/request text eol=lf
 deploy/automation/ssh-entry text eol=lf
+deploy/automation/*.py text eol=lf

@@ -5,7 +5,7 @@ umask 077
 export LC_ALL=C GIT_TERMINAL_PROMPT=0
 base=/opt/yuqu
 trusted=/usr/local/libexec/yuqu-deploy
-origin=https://github.com/OXOOOOX/YuQuLibrary.git
+api=https://api.github.com/repos/OXOOOOX/YuQuLibrary
 sha=$1; run=$2
 [[ $(id -u) == 0 && $sha =~ ^[0-9a-f]{40}$ && $(dirname "$run") == "$base/deployment-runs" && -d $run ]] || exit 64
 
@@ -19,22 +19,20 @@ maintenance=$base/shared/deploy-maintenance
 [[ ! -e $maintenance ]] || fail 'Previous schema transition needs review.'
 old=$(readlink -e "$base/current")
 [[ -d $old && $(dirname "$old") == "$base/releases" && -f $old/release.env ]] || fail 'Invalid current release.'
-mirror=$base/main.git
-if [[ ! -d $mirror ]]; then git init --quiet --bare "$mirror"; fi
-repo() { git -c core.hooksPath=/dev/null --git-dir="$mirror" "$@"; }
+download() {
+  curl --proto '=https' --fail --silent --show-error --connect-timeout 10 --max-time 90 \
+    --retry 3 --retry-delay 2 --retry-all-errors --header 'Cache-Control: no-cache' "$@"
+}
 head_of_main() {
-  local line
-  line=$(timeout 90 git ls-remote --exit-code "$origin" refs/heads/main) || return 1
-  [[ $line =~ ^([0-9a-f]{40})[[:space:]]refs/heads/main$ ]] || return 1
-  printf '%s\n' "${BASH_REMATCH[1]}"
+  local head
+  download -o "$run/head.json" "$api/git/ref/heads/main?check=$(date +%s%N)" || return 1
+  head=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["ref"]=="refs/heads/main" and r["object"]["type"]=="commit"; print(r["object"]["sha"])' "$run/head.json") || return 1
+  [[ $head =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\n' "$head"
 }
 phase fetching
-timeout 240 git -c core.hooksPath=/dev/null -c fetch.fsckObjects=true --git-dir="$mirror" fetch --no-tags "$origin" '+refs/heads/main:refs/heads/main'
-if [[ $(repo rev-parse refs/heads/main) != "$sha" ]]; then finish superseded; exit 0; fi
-for file in automation/ssh-entry automation/request automation/deploy-main.sh upgrade-schema.sh compose.yaml; do
-  repo show "$sha:deploy/$file" | cmp -s - "$trusted/${file##*/}" ||
-    fail 'Install the reviewed changes to the host deployment tools first.'
-done
+head=$(head_of_main) || fail 'Cannot verify main.'
+if [[ $head != "$sha" ]]; then finish superseded; exit 0; fi
 
 compose() {
   local release=$1; shift
@@ -68,16 +66,17 @@ if [[ $old == "$next" ]]; then
 fi
 
 phase building
-# Export only application/build files. Credentials and release.env stay outside the Docker build context.
-paths=(.dockerignore package.json package-lock.json tsconfig.json apps/web packages db scripts workers/ingestion workers/codex-bridge/package.json deploy/Dockerfile deploy/compose.yaml)
-repo ls-tree -r --format='%(objectmode)' "$sha" -- "${paths[@]}" > "$run/source-modes"
-if grep -qxvE '100644|100755' "$run/source-modes"; then fail 'Unsupported source entry.'; fi
 image=yuqu:git-$sha
+work=$(mktemp -d "$base/releases/.build-$sha.XXXXXXXX")
+trap 'if [[ -n ${work:-} && $(dirname "$work") == "$base/releases" && $(basename "$work") == ".build-$sha."* ]]; then rm -rf -- "$work"; fi' EXIT
+download -o "$run/commit.json" "$api/git/commits/$sha"
+tree=$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["sha"]==sys.argv[2]; print(c["tree"]["sha"])' "$run/commit.json" "$sha")
+[[ $tree =~ ^[0-9a-f]{40}$ ]] || fail 'Invalid commit tree.'
+download -o "$run/tree.json" "$api/git/trees/$tree?recursive=1"
+download -o "$run/source.tar.gz" "https://codeload.github.com/OXOOOOX/YuQuLibrary/tar.gz/$sha"
+(umask 022; python3 -I "$trusted/stage-source.py" "$run" "$sha" "$tree" "$work" "$trusted")
+rm -f "$run/source.tar.gz"
 if [[ ! -d $next ]]; then
-  work=$(mktemp -d "$base/releases/.build-$sha.XXXXXXXX")
-  trap 'if [[ -n ${work:-} && $(dirname "$work") == "$base/releases" && $(basename "$work") == ".build-$sha."* ]]; then rm -rf -- "$work"; fi' EXIT
-  # tar must create traversable source subdirectories for the container's unprivileged user.
-  (umask 022; repo archive --format=tar "$sha" -- "${paths[@]}" | tar --no-same-owner -xf - -C "$work")
   (
     set -a
     source "$old/release.env"
@@ -93,9 +92,11 @@ if [[ ! -d $next ]]; then
   sed "s|^YUQU_IMAGE=.*|YUQU_IMAGE=$image|" "$old/release.env" > "$work/release.env"
   [[ $(grep -cFx "YUQU_IMAGE=$image" "$work/release.env") == 1 ]]
   mv -T "$work" "$next"
-  work=''
-  trap - EXIT
+else
+  rm -rf -- "$work"
 fi
+work=''
+trap - EXIT
 candidate=$(cat "$next/built-image-id.txt")
 [[ $candidate =~ ^sha256:[a-f0-9]{64}$ && $(docker image inspect "$image" -f '{{.Id}}') == "$candidate" &&
    $(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}') == "$sha" ]] || fail 'Revision mismatch.'
@@ -109,8 +110,6 @@ still_main() {
   head=$(head_of_main) || fail 'Cannot verify main.'
   if [[ $head != "$sha" ]]; then finish superseded; exit 0; fi
 }
-still_main
-
 change_started=0
 schema_started=0
 cleanup() {
@@ -140,6 +139,7 @@ active_leases() {
           + (SELECT count(*) FROM yuqu.summary_nodes WHERE status='running' AND lease_until>now());"
 }
 if (( pending > 0 )); then
+  still_main
   phase draining
   deadline=$((SECONDS + 600))
   while :; do

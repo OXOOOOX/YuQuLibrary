@@ -6,7 +6,7 @@
 
 部署私钥保存在环境 Secret `YUQU_DEPLOY_KEY`。环境 Secret `YUQU_SSH_KNOWN_HOSTS` 保存经管理员连接确认的服务器公钥，别名为 `yuqu-production`；环境变量 `YUQU_DEPLOY_HOST` 指定 SSH 主机。生产数据库、邮件、问答和转写凭据保存在原有运行环境。
 
-服务器的专用账号 `yuqu-deploy` 只接受 `deploy <完整提交 SHA>`。服务器自行从 GitHub 读取 `main`，取得发布锁，构建镜像并核对应用和下载 Worker 的运行镜像。被更新提交取代的请求会跳过。公网 [健康接口](https://fish.sdspeed.com.cn/api/health) 的 `revision` 应与成功运行的提交一致。
+服务器的专用账号 `yuqu-deploy` 只接受 `deploy <完整提交 SHA>`。服务器取得发布锁，通过 GitHub API 确认 `main`，按提交下载官方源码归档，逐个核对构建文件的 Git 摘要，再构建镜像并核对应用和下载 Worker 的运行镜像。被更新提交取代的请求会跳过。公网 [健康接口](https://fish.sdspeed.com.cn/api/health) 的 `revision` 应与成功运行的提交一致。
 
 出现新迁移时，先等待在途租约结束、停写并备份，在隔离库恢复并演练后才迁移生产库。普通应用切换失败会恢复旧镜像。生产迁移已开始后如遇异常，保留停写状态和备份，先检查迁移账本与故障记录再恢复写入。数据库、同机其他站点及独立运行的 Bridge、ASR 均由原服务管理。
 

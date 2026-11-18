@@ -75,3 +75,25 @@ test('a complete BV identifier normalizes to the same public video URL without a
   assert.equal(normalizeImportUrl(' BV1xx411c7mD '), 'https://www.bilibili.com/video/BV1xx411c7mD');
   assert.throws(() => normalizeImportUrl('BVbad'), error => error.code === 'IMPORT_SOURCE_INVALID');
 });
+
+test('Bilibili share text accepts the copied title, escaped colon and surrounding quotes', () => {
+  const shareTitle = '【EVA的精神分析：碇真嗣到底在逃避什么？【新世纪福音战士的精神分析（1）】-哔哩哔哩】';
+  const shortUrl = 'https://b23.tv/BV1Jbxq6uEcP';
+  const fullUrl = 'https://www.bilibili.com/video/BV1Jbxq6uEcP?p=2&from=share';
+  assert.equal(normalizeImportUrl(`“${shareTitle} https\\://b23.tv/BV1Jbxq6uEcP"`), shortUrl);
+  for (const separator of [' ', '\r\n', '']) {
+    assert.equal(normalizeImportUrl(shareTitle + separator + shortUrl), shortUrl);
+  }
+  assert.equal(normalizeImportUrl(shareTitle + ' ' + fullUrl + '”'), fullUrl);
+});
+
+test('share text requires one Bilibili link and preserves ordinary source URLs', () => {
+  const shortUrl = 'https://b23.tv/BV1Jbxq6uEcP';
+  for (const input of ['【标题】', '【标题】 https://feed.example/rss', '【标题】 https://b23.tv.example/a',
+    '【标题】 https://user@b23.tv/video', '【标题】 https://b23.tv:8443/video', '长'.repeat(2048) + ' ' + shortUrl]) {
+    assert.throws(() => normalizeImportUrl(input), { code: 'IMPORT_SOURCE_INVALID' });
+  }
+  assert.throws(() => normalizeImportUrl(`【标题】 ${shortUrl} https://b23.tv/second`), /一次粘贴一个链接/);
+  const feed = 'https://feed.example/rss?source=https://b23.tv/example';
+  assert.equal(normalizeImportUrl(feed), feed);
+});

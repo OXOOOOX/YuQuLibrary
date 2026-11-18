@@ -82,8 +82,20 @@ export async function reservePreview(pool: Pool, profile: AccountSession): Promi
 
 export interface ImportPreview { kind: 'audio' | 'rss' | 'bilibili'; title: string; episodes: { title: string; url: string }[] }
 export function normalizeImportUrl(value: unknown): string {
-  const candidate = typeof value === 'string' && /^BV[0-9A-Za-z]{10}$/.test(value.trim()) ? `https://www.bilibili.com/video/${value.trim()}` : value;
-  return sourceUrl(candidate).href;
+  if (typeof value === 'string' && value.length <= 2048) {
+    const text = value.trim();
+    if (/^BV[0-9A-Za-z]{10}$/.test(text)) return sourceUrl(`https://www.bilibili.com/video/${text}`).href;
+    if (/^https?:\/\/\S+$/i.test(text)) return sourceUrl(text).href;
+
+    // A single-line paste can join the closing title bracket directly to the link.
+    const links = [...text.matchAll(/(?:^|[\s】“"'「])(https?\\?:\/\/\S+)/gi)];
+    if (links.length > 1) throw new AppError(400, 'IMPORT_SOURCE_INVALID', '请一次粘贴一个链接。');
+    if (links.length === 1) {
+      const url = links[0][1].replace(/^https\\:/i, 'https:').replace(/["'”」】。，！？]+$/u, '');
+      if (isBilibiliUrl(url)) return sourceUrl(url).href;
+    }
+  }
+  return sourceUrl(value).href;
 }
 /** Every HTTP request goes through the same public-address checks and fixed-IP connector as ingestion. */
 export async function previewImportSource(input: unknown, signal: AbortSignal, open: typeof openRemote = openRemote): Promise<ImportPreview> {

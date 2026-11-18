@@ -133,7 +133,7 @@ export function LibraryPanel({ currentMediaId, playbackBusy, play, read, removed
             onChange={event => { setUrl(event.target.value); setPreview(null); setError(''); setNotice(''); }} /></label>
         {preview?.kind === 'audio' ? <label className="field"><span>标题（可选）</span><input aria-label="音频标题" maxLength={240} value={title} disabled={busy} onChange={event => setTitle(event.target.value)} /></label> : null}
         <button type="submit" className="primary" disabled={busy || !url.trim()}>{busy ? '正在识别…' : '识别并预览'}</button>
-        <p className="muted">支持公开 B 站视频音轨、RSS 和 MP3、M4A、AAC、WAV；每集最多 100 MB、4 小时。下载后可收听，文稿自动转写。B 站支持完整 BV 链接和 b23.tv 短链接。</p>
+        <p className="muted">支持公开 B 站视频音轨、RSS 和 MP3、M4A、AAC、WAV，每集最多 100 MB、4 小时。下载后可收听，文稿自动转写。B 站可整段粘贴带标题的分享文本，也支持 BV 号、完整视频链接和 b23.tv 短链接。</p>
       </form>
       {notice ? <p role="status" className="muted">{notice}</p> : null}
       {error ? <p role="alert" className="error">{error}</p> : null}

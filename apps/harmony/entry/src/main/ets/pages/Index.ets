@@ -1315,7 +1315,7 @@ struct Index {
       Column({ space: 18 }) {
         Column({ space: 9 }) {
           Text('粘贴链接').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.yuqu_ink'))
-          TextInput({ text: this.importUrl, placeholder: '音频、RSS、BV 或 b23.tv 链接' }).id('library-import-url')
+          TextInput({ text: this.importUrl, placeholder: '音频链接、RSS、BV 号或 B 站分享文本' }).id('library-import-url')
             .maxLength(2048).height(48).fontSize(15).borderRadius(12)
             .backgroundColor($r('app.color.yuqu_subtle')).fontColor($r('app.color.yuqu_ink'))
             .placeholderColor($r('app.color.yuqu_muted')).enabled(!this.account.libraryBusy)

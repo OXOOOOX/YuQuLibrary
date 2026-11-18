@@ -1,5 +1,17 @@
 # 鱼趣知识库部署与验证记录
 
+## 从 main 自动更新网站
+
+推送到 `main` 会触发 GitHub Actions 的 [Deploy production](https://github.com/OXOOOOX/YuQuLibrary/actions/workflows/deploy-production.yml)。CI 使用 Node 24 执行 `npm ci`、`npm run check` 和独立 PostgreSQL 18 测试库的全量集成测试。通过后，独立的部署任务才可使用 GitHub 的 `production` 环境。该环境只允许 `main` 分支。
+
+部署私钥保存在环境 Secret `YUQU_DEPLOY_KEY`。环境 Secret `YUQU_SSH_KNOWN_HOSTS` 保存经管理员连接确认的服务器公钥，别名为 `yuqu-production`；环境变量 `YUQU_DEPLOY_HOST` 指定 SSH 主机。生产数据库、邮件、问答和转写凭据保存在原有运行环境。
+
+服务器的专用账号 `yuqu-deploy` 只接受 `deploy <完整提交 SHA>`。服务器自行从 GitHub 读取 `main`，取得发布锁，构建镜像并核对应用和下载 Worker 的运行镜像。被更新提交取代的请求会跳过。公网 [健康接口](https://fish.sdspeed.com.cn/api/health) 的 `revision` 应与成功运行的提交一致。
+
+出现新迁移时，先等待在途租约结束、停写并备份，在隔离库恢复并演练后才迁移生产库。普通应用切换失败会恢复旧镜像。生产迁移已开始后如遇异常，保留停写状态和备份，先检查迁移账本与故障记录再恢复写入。数据库、同机其他站点及独立运行的 Bridge、ASR 均由原服务管理。
+
+可在 GitHub Actions 重跑失败任务。生产管理员可按运行日志中的编号检查 `/opt/yuqu/deployment-runs/<编号>/log`。部署入口、迁移工具或 Compose 权限需要调整时，管理员从已审阅的工作树执行 `sudo bash deploy/automation/install.sh <专用公钥文件>` 更新宿主机副本。鸿蒙签名和 AppTest 分发另行办理。
+
 ## 2026-11-19 生产升级
 
 [鱼趣知识库](https://fish.sdspeed.com.cn/) 的网页与 API 已升级至 `20261118-1efca90acbb08846`。发布用的 122 个服务器文件与 Git 提交 `697c8dc` 逐文件一致。GitHub 保存源码，此次生产发布通过独立的服务器升级流程完成。

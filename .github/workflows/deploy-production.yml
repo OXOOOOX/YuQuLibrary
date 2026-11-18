@@ -1,0 +1,104 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: yuqu_actions_test
+          POSTGRES_USER: yuqu_ci
+          POSTGRES_PASSWORD: ephemeral_actions_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yuqu_ci -d yuqu_actions_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run check
+      - name: Run PostgreSQL integration tests
+        env:
+          YUQU_TEST_DATABASE_URL: postgresql://yuqu_ci:ephemeral_actions_test@127.0.0.1:5432/yuqu_actions_test
+        run: npm run test:integration
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: yuqu-production
+      cancel-in-progress: false
+    steps:
+      - name: Deploy the tested commit
+        id: release
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ vars.YUQU_DEPLOY_HOST }}
+          DEPLOY_KEY: ${{ secrets.YUQU_DEPLOY_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.YUQU_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_HOST:?Missing production host}" "${DEPLOY_KEY:?Missing deployment key}" "${DEPLOY_KNOWN_HOSTS:?Missing host key}"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          umask 077
+          ssh_dir=$(mktemp -d "$RUNNER_TEMP/yuqu-ssh.XXXXXXXX")
+          trap 'rm -rf -- "$ssh_dir"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" | tr -d '\r' > "$ssh_dir/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" | tr -d '\r' > "$ssh_dir/known_hosts"
+          unset DEPLOY_KEY DEPLOY_KNOWN_HOSTS
+          ssh-keygen -F yuqu-production -f "$ssh_dir/known_hosts" > /dev/null
+          ssh -T -F /dev/null -i "$ssh_dir/key" -l yuqu-deploy \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o HostKeyAlias=yuqu-production -o UserKnownHostsFile="$ssh_dir/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
+            -o ForwardAgent=no -o ForwardX11=no -o ConnectTimeout=15 \
+            -o ServerAliveInterval=20 -o ServerAliveCountMax=6 \
+            -- "$DEPLOY_HOST" "deploy $GITHUB_SHA" | tee "$ssh_dir/result"
+          case "$(tail -n 1 "$ssh_dir/result")" in
+            "deployed $GITHUB_SHA")
+              echo 'result=deployed' >> "$GITHUB_OUTPUT"
+              ;;
+            "superseded $GITHUB_SHA")
+              echo 'result=superseded' >> "$GITHUB_OUTPUT"
+              echo "A newer main commit superseded $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "::error::The deployment command returned no matching result for $GITHUB_SHA."
+              exit 1
+              ;;
+          esac
+
+      - name: Verify the public revision
+        if: steps.release.outputs.result == 'deployed'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..12}; do
+            if curl --silent --show-error --fail --connect-timeout 5 --max-time 10 \
+              --header 'Cache-Control: no-cache' https://fish.sdspeed.com.cn/api/health |
+              jq -e --arg sha "$GITHUB_SHA" '.service == "yuqu-library" and .status == "ok" and .revision == $sha' > /dev/null; then
+              echo "Production is serving $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if (( attempt < 12 )); then sleep 5; fi
+          done
+          echo "::error::The production health endpoint did not report $GITHUB_SHA."
+          exit 1

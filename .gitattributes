@@ -1,3 +1,5 @@
 # Migration checksums and deployment scripts must match their Linux bytes.
 *.sql text eol=lf
 *.sh text eol=lf
+deploy/automation/request text eol=lf
+deploy/automation/ssh-entry text eol=lf

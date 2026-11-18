@@ -1,0 +1,20 @@
+#!/bin/bash
+# SSH disconnects must not interrupt an in-progress schema change.
+set -euo pipefail
+umask 077
+[[ $(id -u) == 0 && $# == 1 && $1 =~ ^[0-9a-f]{40}$ ]] || exit 64
+sha=$1
+logs=/opt/yuqu/deployment-runs
+install -d -m 0700 "$logs"
+run=$(mktemp -d "$logs/$sha.XXXXXXXX")
+echo 'Production deployment requested.'
+if ! systemd-run --quiet --wait --collect --service-type=exec \
+  --property="StandardOutput=append:$run/log" --property=StandardError=inherit \
+  /usr/local/libexec/yuqu-deploy/deploy-main.sh "$sha" "$run"; then
+  # Keep build output, server addresses and diagnostics on the host.
+  echo "Deployment failed during $(cat "$run/phase" 2>/dev/null || echo startup). Server log ID: $(basename "$run")" >&2
+  exit 1
+fi
+result=$(cat "$run/result")
+[[ $result == "deployed $sha" || $result == "superseded $sha" ]] || exit 1
+echo "$result"

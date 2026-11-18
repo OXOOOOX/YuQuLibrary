@@ -46,4 +46,7 @@ RUN mkdir -p /data/media && chown node:node /data/media
 USER node
 WORKDIR /app/apps/web
 EXPOSE 3000
+ARG YUQU_REVISION
+ENV YUQU_REVISION=${YUQU_REVISION}
+LABEL org.opencontainers.image.revision=${YUQU_REVISION}
 CMD ["node", "../../node_modules/next/dist/bin/next", "start", "-H", "0.0.0.0", "-p", "3000"]

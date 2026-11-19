@@ -67,7 +67,7 @@ function EmailLogin({ session }: { session: PlaybackSession }) {
       {notice ? <p className="muted" role="status">{notice}</p> : null}
       {localDelivery && challenge ? <p className="muted">本地开发：在项目目录运行 <code>npm run mail:inbox</code> 查看测试邮件。</p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
-      <p className="muted">邮箱用于登录；资料、播放进度和对话将保存到云端。提问时，问题和相关文稿会发送给 OpenAI Codex。<a href="/privacy" target="_blank" rel="noopener noreferrer">查看隐私说明</a>。</p>
+      <p className="muted">邮箱用于登录。资料、播放进度和对话将保存到云端。你提问时，开发者部署的大模型服务会调用外部模型处理你的问题和相关文稿，生成回答。<a href="/privacy" target="_blank" rel="noopener noreferrer">查看隐私说明</a>。</p>
     </div>
   </details>;
 }

@@ -537,7 +537,7 @@ struct Index {
               .enabled(!this.account.busy && this.account.challengeReady)
               .onClick(() => { void AccountSync.getInstance().verifyCode(this.serverUrl, this.email, this.code); })
             Text('未登录时可试听本地样本；登录后两端使用同一邮箱同步进度。').fontSize(12).fontColor($r('app.color.yuqu_muted'))
-            Text('邮箱用于登录；导入资料、文稿、播放进度和对话将保存到云端。提问时，问题和相关文稿会发送给 OpenAI Codex 生成回答。')
+            Text('邮箱用于登录。导入资料、文稿、播放进度和对话将保存到云端。你提问时，开发者部署的大模型服务会调用外部模型处理你的问题和相关文稿，生成回答。')
               .fontSize(12).fontColor($r('app.color.yuqu_muted'))
           }
           Hyperlink('https://fish.sdspeed.com.cn/privacy', '隐私说明与数据管理')

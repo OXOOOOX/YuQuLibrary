@@ -159,16 +159,34 @@ function parseAudio(value: unknown, video: Video, page: Page): BilibiliAudio {
   // Metadata rounds to seconds. A materially shorter stream must never be stored as a full episode.
   if (Math.abs(durationMs - page.durationMs) > Math.max(2500, page.durationMs * 0.01)) throw restricted();
   const dash = object(data.dash);
-  const candidates = (Array.isArray(dash?.audio) ? dash.audio : []).flatMap(raw => {
-    const audio = object(raw);
-    if (!audio || String(audio.mimeType ?? audio.mime_type).toLowerCase() !== 'audio/mp4' ||
-        typeof audio.codecs !== 'string' || !/^mp4a(?:\.|$)/i.test(audio.codecs) || !positive(audio.bandwidth)) return [];
+  const tracks = (Array.isArray(dash?.audio) ? dash.audio : []).map(object).filter((track): track is JsonObject =>
+    track !== undefined && String(track.mimeType ?? track.mime_type).toLowerCase() === 'audio/mp4' &&
+    typeof track.codecs === 'string' && /^mp4a(?:\.|$)/i.test(track.codecs));
+  if (!tracks.length) throw fail('BILIBILI_AAC_UNAVAILABLE', 'B 站此次未提供可单独导入的 AAC 音轨。');
+
+  const withinLimit = tracks.flatMap(track => {
+    const bandwidth = track.bandwidth;
     // Leave a little room for the MP4 container; actual bytes remain bounded by the downloader.
-    if (durationMs / 1000 * audio.bandwidth / 8 * 1.05 > MAX_MEDIA_BYTES) return [];
-    try { return [{ url: validateBilibiliAudioUrl(audio.baseUrl ?? audio.base_url ?? audio.url), bandwidth: audio.bandwidth }]; }
-    catch { return []; }
+    if (!positive(bandwidth) || durationMs / 1000 * bandwidth / 8 * 1.05 > MAX_MEDIA_BYTES) return [];
+    return [{ track, bandwidth }];
   });
-  if (!candidates.length) throw fail('BILIBILI_AUDIO_UNAVAILABLE', '没有可导入的独立 AAC 音轨，或音轨预计超过 100 MiB。');
+  if (!withinLimit.length) {
+    if (tracks.some(track => !positive(track.bandwidth))) {
+      throw fail('BILIBILI_AUDIO_BITRATE_UNKNOWN', 'B 站返回的音轨码率信息不完整，无法确认音频大小，请稍后重试。');
+    }
+    throw fail('BILIBILI_AUDIO_TOO_LARGE', '该分 P 的所有独立 AAC 音轨预计都超过 100 MiB。');
+  }
+
+  const candidates = withinLimit.flatMap(({ track, bandwidth }) => {
+    const backups = [track.backupUrl, track.backup_url].flat();
+    for (const address of [track.baseUrl, track.base_url, track.url, ...backups]) {
+      if (typeof address !== 'string') continue;
+      try { return [{ url: validateBilibiliAudioUrl(address), bandwidth }]; }
+      catch { /* Another CDN address for this track may be usable. */ }
+    }
+    return [];
+  });
+  if (!candidates.length) throw fail('BILIBILI_AUDIO_URL_UNAVAILABLE', 'B 站返回的独立 AAC 音轨暂时没有可用的下载地址，请稍后重试。');
   const moderate = candidates.filter(item => item.bandwidth <= 160_000).sort((a, b) => b.bandwidth - a.bandwidth);
   const selected = moderate[0] ?? candidates.sort((a, b) => a.bandwidth - b.bandwidth)[0];
   return { audioUrl: selected.url, title: pageTitle(video, page), bvid: video.bvid, cid: page.cid, page: page.page, durationMs };

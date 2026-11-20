@@ -110,17 +110,35 @@ test('materially shorter playback cannot be labelled as a complete part', async 
   await assert.rejects(provider(view(), playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_SOURCE_RESTRICTED' });
 });
 test('missing or non-AAC audio has no fallback to video or manifests', async () => {
-  for (const tracks of [[], [{ ...audio(), codecs: 'ec-3' }], [{ ...audio(), mimeType: 'video/mp4' }], [{ ...audio(), bandwidth: 0 }]]) {
+  for (const tracks of [[], [{ ...audio(), codecs: 'ec-3' }], [{ ...audio(), mimeType: 'video/mp4' }]]) {
     const playback = play(); playback.data.dash.audio = tracks;
-    await assert.rejects(provider(view(), playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_AUDIO_UNAVAILABLE' });
+    await assert.rejects(provider(view(), playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_AAC_UNAVAILABLE' });
+  }
+});
+test('audio address aliases and mirrors are considered in order within the preferred track', async () => {
+  const primary = audio().baseUrl;
+  const backup = 'https://cdn.bilivideo.cn/test/medium.m4s?deadline=1&sign=abc%2F123';
+  const other = 'https://mirror.bilivideo.com/test/medium.m4s';
+  const invalid = 'https://bilivideo.cn.attacker.test/medium.m4s';
+  for (const [addresses, expected] of [
+    [{ baseUrl: primary, backupUrl: [backup] }, primary],
+    [{ baseUrl: '', base_url: primary, backupUrl: [backup] }, primary],
+    [{ baseUrl: invalid, url: primary, backup_url: [backup] }, primary],
+    [{ baseUrl: invalid, backupUrl: [invalid, backup], backup_url: [other] }, backup],
+    [{ baseUrl: undefined, backupUrl: [invalid], backup_url: [backup] }, backup],
+    [{ baseUrl: undefined, backup_url: backup }, backup]
+  ]) {
+    const playback = play();
+    playback.data.dash.audio = [audio(64000, 'low'), { ...audio(), ...addresses }];
+    assert.equal((await provider(view(), playback).resolveBilibiliAudio(url, signal())).audioUrl, expected);
   }
 });
 test('audio CDN validation does not allow arbitrary Akamai, private hosts or credentials', async () => {
   for (const value of ['https://attacker.akamaized.net/a.m4s', 'https://bilivideo.com.attacker.test/a', 'https://127.0.0.1/a',
     'https://me:secret@upos-hz-mirrorakam.akamaized.net/a', 'http://upos-hz-mirrorakam.akamaized.net/a', 'https://x.bilivideo.com:8443/a']) {
     assert.throws(() => validateBilibiliAudioUrl(value));
-    const playback = play(); playback.data.dash.audio = [{ ...audio(), baseUrl: value }];
-    await assert.rejects(provider(view(), playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_AUDIO_UNAVAILABLE' });
+    const playback = play(); playback.data.dash.audio = [{ ...audio(), baseUrl: value, backup_url: [value] }];
+    await assert.rejects(provider(view(), playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_AUDIO_URL_UNAVAILABLE' });
   }
   assert.equal(validateBilibiliAudioUrl('https://upos-sz-mirrorcoso1.bilivideo.com/a'), 'https://upos-sz-mirrorcoso1.bilivideo.com/a');
 });
@@ -129,7 +147,9 @@ test('four-hour content selects a smaller audio track to remain within the byte 
   const playback = play(); playback.data.timelength = 14400000; playback.data.dash.audio = [audio(132000), audio(48000, 'low')];
   assert.match((await provider(metadata, playback).resolveBilibiliAudio(url, signal())).audioUrl, /low\.m4s/);
   playback.data.dash.audio = [audio(132000)];
-  await assert.rejects(provider(metadata, playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_AUDIO_UNAVAILABLE' });
+  await assert.rejects(provider(metadata, playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_AUDIO_TOO_LARGE' });
+  playback.data.dash.audio.push(audio(0));
+  await assert.rejects(provider(metadata, playback).resolveBilibiliAudio(url, signal()), { code: 'BILIBILI_AUDIO_BITRATE_UNKNOWN' });
 });
 test('malformed metadata and JSON do not produce guessed IDs or titles', async () => {
   const metadata = view(); metadata.data.bvid = 'BV13x41117TL';

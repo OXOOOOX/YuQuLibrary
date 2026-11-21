@@ -709,6 +709,49 @@ export class AccountSync {
     }
   }
 
+  async playTranscriptSegment(segmentId: string): Promise<boolean> {
+    if (!this.profile || !this.snapshot || !this.foreground || !this.transcriptOpen || this.transcriptJob === null ||
+      this.busy || this.replayChanging || this.selectedAnchor !== null) return false;
+    const segment: TranscriptSegment | undefined = this.transcriptSegments.find((row: TranscriptSegment) => row.id === segmentId);
+    if (!segment || segment.startMs >= this.contentDurationMs()) return false;
+    const mediaId: string = this.contentMediaId();
+    if (this.readingItem?.audioAvailable === false ||
+      this.libraryItems.find((item: LibraryItem) => item.mediaVersionId === mediaId)?.audioAvailable === false) {
+      this.error = '音频已清理，仍可阅读文稿'; this.emit(); return false;
+    }
+    const lifecycle: number = this.lifecycle, syncEpoch: number = this.syncEpoch, reading: number = this.readingIntentEpoch;
+    if (mediaId !== this.snapshot.mediaVersionId || !this.mayControl()) {
+      await this.takeover(mediaId, segment.startMs);
+      const active: PlaybackViewState = this.player.getSnapshot();
+      return this.syncLive(lifecycle, syncEpoch) && this.readingIntentEpoch === reading && this.mayControl() &&
+        active.mediaVersionId === mediaId && active.playerState === 'playing' && this.error.length === 0;
+    }
+    const player: PlaybackViewState = this.player.getSnapshot();
+    if (player.busy || player.recovering) return false;
+    const control: number = this.controlEpoch;
+    this.replayPoint = null; this.pendingReplayPoint = null; this.pendingTakeover = undefined;
+    this.takeoverEpoch = syncEpoch; this.busy = true; this.error = ''; this.emit();
+    try {
+      await this.player.seek(segment.startMs);
+      await this.waitAligned(segment.startMs, player.rate, lifecycle, control);
+      this.assertControl(lifecycle, control);
+      if (this.readingIntentEpoch !== reading || this.contentMediaId() !== mediaId || !this.mayControl()) return false;
+      if (this.player.getSnapshot().playerState !== 'playing') {
+        await this.player.play();
+        this.assertControl(lifecycle, control);
+        if (this.player.getSnapshot().playerState !== 'playing') throw new Error('播放器未能启动，请重试');
+      }
+      return this.readingIntentEpoch === reading;
+    } catch (error) {
+      if (this.syncLive(lifecycle, syncEpoch) && this.controlEpoch === control) this.error = (error as Error).message;
+      return false;
+    } finally {
+      if (this.syncLive(lifecycle, syncEpoch)) {
+        this.takeoverEpoch = -1; this.busy = false; this.emit();
+      }
+    }
+  }
+
   async playCitation(turnId: string, citationId: string): Promise<void> {
     if (!this.profile || this.busy || !this.chatLoaded || this.chatMediaId !== this.contentMediaId()) return;
     const turn: ChatTurn | undefined = this.chatTurns.find((value: ChatTurn) => value.id === turnId);
@@ -952,7 +995,7 @@ export class AccountSync {
     this.emit();
   }
 
-  async refreshTranscript(retry: boolean = false, atMs: number = -1): Promise<void> {
+  async refreshTranscript(retry: boolean = false, atMs: number = -1, stillWanted?: () => boolean): Promise<void> {
     if (!this.profile || !this.foreground || !this.transcriptOpen || this.transcriptBusy || this.contentMediaId().length === 0) return;
     if (retry && this.readingItem?.audioAvailable === false) return;
     const mediaId: string = this.contentMediaId();
@@ -967,7 +1010,7 @@ export class AccountSync {
       const reply: ApiReply = await this.authRequest(retry ? `${path}/retry` : `${path}?${query}`,
         retry ? http.RequestMethod.POST : http.RequestMethod.GET, '', lifecycle, syncEpoch);
       if (!this.syncLive(lifecycle, syncEpoch) || generation !== this.transcriptGeneration ||
-        mediaId !== this.contentMediaId() || !this.transcriptOpen || !this.foreground) return;
+        mediaId !== this.contentMediaId() || !this.transcriptOpen || !this.foreground || (stillWanted && !stillWanted())) return;
       this.validateTranscript(reply, mediaId);
       const job: TranscriptJob | null = reply.job as TranscriptJob | null;
       const identity: string = job?.id ?? 'none';
@@ -979,15 +1022,19 @@ export class AccountSync {
       if (changed || retry) this.transcriptPrevious = [];
       this.transcriptIdentity = identity;
       this.failedTranscriptAt = job?.status === 'failed' ? Date.parse(job.updatedAt) : -1;
-      // Keep displayed sentences and their watermark together while later chunks arrive.
-      if (this.selectedAnchor === null) { this.transcriptJob = job; this.transcriptSegments = (reply.segments as TranscriptSegment[]).slice(); }
+      // A completed request must not move the cursor underneath a new selection.
+      if (this.selectedAnchor !== null && this.selectedAnchor.transcriptJobId === identity && !retry) return;
+      if (this.selectedAnchor !== null) this.clearSelection();
+      this.transcriptJob = job;
+      this.transcriptSegments = (reply.segments as TranscriptSegment[]).slice();
       this.transcriptPageCursor = reply.pageCursor as number;
       this.transcriptNextCursor = reply.nextCursor as number | null;
       this.transcriptLoaded = true;
       this.transcriptError = '';
     } catch (error) {
       if (this.syncLive(lifecycle, syncEpoch) && generation === this.transcriptGeneration &&
-        mediaId === this.contentMediaId() && !this.readingRemoved(error as Error, mediaId)) this.transcriptError = (error as Error).message;
+        mediaId === this.contentMediaId() && (!stillWanted || stillWanted()) &&
+        !this.readingRemoved(error as Error, mediaId)) this.transcriptError = (error as Error).message;
     } finally {
       if (generation === this.transcriptGeneration) this.transcriptBusy = false;
       if (this.live(lifecycle)) this.emit();
@@ -1135,17 +1182,27 @@ export class AccountSync {
   clearSelection(): void { this.selectedSegments = []; this.selectedAnchor = null; this.emit(); }
   toggleSegment(segmentId: string): void {
     if (this.transcriptBusy || this.transcriptJob === null) return;
-    const index: number = this.transcriptSegments.findIndex((segment: TranscriptSegment) => segment.id === segmentId);
-    if (index < 0) return;
     if (this.selectedSegments.length === 1 && this.selectedSegments[0].id === segmentId) { this.clearSelection(); return; }
-    const first: number = this.selectedSegments.length > 0 ? this.transcriptSegments.findIndex((segment: TranscriptSegment) => segment.id === this.selectedSegments[0].id) : index;
-    const from: number = Math.min(first, index), to: number = Math.max(first, index);
-    if (to - from >= 32) { this.transcriptError = '一次最多选择 32 个连续片段'; this.emit(); return; }
+    this.setTranscriptSelectionRange(this.selectedSegments[0]?.id ?? segmentId, segmentId, false);
+  }
+
+  setTranscriptSelectionRange(anchorId: string, endId: string, clampToLimit: boolean = true): void {
+    if (!this.transcriptOpen || this.transcriptJob === null) return;
+    const anchor: number = this.transcriptSegments.findIndex((row: TranscriptSegment) => row.id === anchorId);
+    const end: number = this.transcriptSegments.findIndex((row: TranscriptSegment) => row.id === endId);
+    if (anchor < 0 || end < 0) return;
+    const overLimit: boolean = Math.abs(end - anchor) >= 32;
+    if (overLimit && !clampToLimit) { this.transcriptError = '一次最多选择 32 个连续片段'; this.emit(); return; }
+    const last: number = Math.min(anchor + 31, Math.max(anchor - 31, end));
+    const from: number = Math.min(anchor, last), to: number = Math.max(anchor, last);
+    const message: string = overLimit ? '一次最多选择 32 个连续片段' : '';
+    if (this.selectedSegments[0]?.id === this.transcriptSegments[from].id &&
+      this.selectedSegments[this.selectedSegments.length - 1]?.id === this.transcriptSegments[to].id && this.transcriptError === message) return;
     if (this.selectedAnchor === null) this.selectedAnchor = { kind: 'transcript-selection', transcriptJobId: this.transcriptJob.id,
       throughMs: this.transcriptJob.completedMs, segmentIds: [] };
     this.selectedSegments = this.transcriptSegments.slice(from, to + 1);
     this.selectedAnchor.segmentIds = this.selectedSegments.map((segment: TranscriptSegment) => segment.id);
-    this.transcriptError = ''; this.emit();
+    this.transcriptError = message; this.emit();
   }
   askSelection(): void {
     if (this.selectedAnchor === null || this.chatBusy) return;

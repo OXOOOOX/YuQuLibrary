@@ -29,9 +29,9 @@ export struct PrimaryTabs {
 
   build() {
     Row({ space: 6 }) {
-      this.tabItem('listen', '收听', $r('sys.symbol.headphones'))
       this.tabItem('library', '资料库', $r('sys.symbol.folder'))
-      this.tabItem('saved', '收藏', $r('sys.symbol.bookmark'))
+      this.tabItem('listen', '收听', $r('sys.symbol.headphones'))
+      this.tabItem('chat', '对话', $r('sys.symbol.message'))
     }
     .width('100%')
     .padding({ left: 12, right: 12, top: 4, bottom: 4 })

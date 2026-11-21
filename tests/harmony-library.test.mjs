@@ -60,6 +60,43 @@ const savedItem=(id)=>({id,mediaVersionId:'fixture-pcm-v1',mediaTitle:'测试资
 
 const checks=[];
 {
+ const e=create();
+ const page=createPage(e);
+ const swipe=(offsetX,offsetY=0)=>page.finishPlayerSwipe({offsetX,offsetY});
+ swipe(-100);
+ assert.equal(page.section,'listen');
+ await signIn(e);
+ await e.account.takeover();
+ await settle();
+ assert.equal(e.player.state.playerState,'playing');
+ const position=e.player.state.positionMs;
+ const before=e.calls.length;
+ for(const [x,y] of [[100,0],[-15,0],[-80,100]]) {
+  swipe(x,y);
+  assert.equal(page.section,'listen');
+ }
+ page.accountOpen=true;
+ swipe(-100);
+ assert.equal(page.accountOpen,true);
+ page.onBackPress();
+ page.showChat();
+ assert.equal(page.section,'chat');
+ swipe(-100);
+ assert.equal(page.account.chatOpen,true);
+ page.onBackPress();
+ assert.equal(page.section,'listen');
+ swipe(-100);
+ assert.equal(page.section,'library');
+ assert.equal(page.showLibrary,true);
+ assert.equal(page.onBackPress(),false);
+ assert.equal(e.player.state.playerState,'playing');
+ assert.equal(e.player.state.positionMs,position);
+ assert.deepEqual(e.calls.slice(before),[]);
+ page.aboutToDisappear();
+ e.account.release();
+ checks.push('left swipe returns from the player to the library without touching playback and respects nested navigation');
+}
+{
  const e=create();await signIn(e);const base=e.initialHandler;const a={...e.getSnapshot(),mediaVersionId:'media-a',contentId:'content-a',title:'A',durationMs:240000,positionMs:180000};
  e.setHandler(async(p,b,o)=>{if(p.endsWith('/takeover')){const next={...a,revision:2,generation:1,sequence:0,ownerSessionId:'s1',playbackSessionId:'p-a'};e.setSnapshot(next);return {accepted:true,snapshot:next};}return base(p,b,o);});
  await e.account.takeover('media-a');await settle();assert.equal(e.account.getSnapshot().title,'A');assert.equal(e.account.getSnapshot().durationMs,240000);assert.equal(e.account.getSnapshot().owner,true);assert.equal(e.player.state.mediaVersionId,'media-a');assert.equal(e.player.state.positionMs,180000);const t=e.requests.find(r=>r.path.endsWith('/takeover'));assert.equal(t.body.mediaVersionId,'media-a');const r=e.requests.filter(r=>r.path.endsWith('/report')).at(-1).body;assert.equal(r.mediaVersionId,'media-a');assert.equal(r.contentId,'content-a');assert.equal(r.positionMs,180000);assert.ok(e.calls.findIndex(c=>Array.isArray(c)&&c[0]==='load')<e.calls.indexOf('play'));
@@ -436,6 +473,41 @@ for(const available of [false,null]){
  checks.push('the actual transcript/chat page actions select exactly one panel and reselecting a tab leaves it visible');page.aboutToDisappear();e.account.release();
 }
 {
+ const e=create();await signIn(e);const page=createPage(e);
+ const archive=libraryItem('archived-episode');
+ const bookmark={...savedItem('excerpt'),mediaVersionId:archive.mediaVersionId,mediaTitle:archive.title};
+ e.setHandler((path,body,options)=>{
+  if(path==='/api/library')return {items:[archive],usage};
+  if(path==='/api/saved-items')return {items:[bookmark],nextCursor:null};
+  if(path.endsWith('/transcript'))return transcript(path.split('/')[3]);
+  if(path.endsWith('/chat'))return chat(path.split('/')[3],[],false);
+  return e.initialHandler(path,body,options);
+ });
+ const playback=e.account.getSnapshot().mediaVersionId,actions=e.calls.length;
+ page.switchSection('library');page.switchSection('saved');await settle();
+ assert.equal(page.sectionTitle(),'资料库');
+ assert.equal(page.account.savedItems[0].id,bookmark.id);
+ assert.equal(page.onBackPress(),true);
+ assert.equal(page.section,'library');
+ page.switchSection('saved');await settle();
+ page.showTranscript();await e.account.readSaved(bookmark);await settle();
+ e.account.toggleSegment('segment-archived-episode');e.account.askSelection();page.showChat();await settle();
+ assert.equal(page.section,'chat');
+ assert.equal(page.account.readingMediaVersionId,archive.mediaVersionId);
+ assert.ok(e.requests.some(request=>request.path==='/api/media/archived-episode/chat'));
+ e.account.setChatDraft('关于收藏原文的问题');
+ page.switchSection('library');page.switchSection('chat');await settle();
+ assert.equal(page.account.chatDraft,'关于收藏原文的问题');
+ assert.equal(page.account.chatCanSend,true);
+ assert.equal(page.onBackPress(),true);
+ assert.equal(page.section,'listen');
+ assert.equal(page.account.transcriptSegments[0].id,'segment-archived-episode');
+ assert.equal(page.account.mediaVersionId,playback);
+ assert.deepEqual(e.calls.slice(actions),[]);
+ checks.push('library bookmarks open the archived transcript; the main chat tab keeps its selected source and draft across navigation without touching playback');
+ page.aboutToDisappear();e.account.release();
+}
+{
  const e=create();await signIn(e);let delayed=false;const pending=deferred();const items=[libraryItem('media-a',true),libraryItem('media-b',true)];
  e.setHandler((p,b,o)=>{if(p==='/api/library')return delayed?pending.promise:{items,usage};if(p==='/api/imports')return {jobs:[]};if(p.endsWith('/transcript'))return transcript(p.split('/')[3]);return e.initialHandler(p,b,o);});
  e.account.setLibraryOpen(true);await settle();delayed=true;const read=e.account.readSaved({...savedItem('a'),mediaVersionId:'media-a'});await settle();e.account.selectReading('media-b');await settle();pending.resolve({items,usage});await read;await settle();assert.equal(e.account.getSnapshot().readingMediaVersionId,'media-b');assert.equal(e.account.getSnapshot().transcriptSegments[0].id,'segment-media-b');
@@ -794,6 +866,236 @@ const topicPage=(index=0,after=0,mediaVersionId='fixture-pcm-v1',overrides={})=>
   await new Promise(resolve=>setTimeout(resolve,170));assert.equal(moves.length,0,stop);page.aboutToDisappear();e.account.release();
  }
  checks.push('scheduled theme alignment is retired after collapse, background, media reset, regenerated document and page exit');
+}
+
+function timedTranscript(segments, completedMs = 120000, mediaVersionId = 'fixture-pcm-v1') {
+  const result = transcript(mediaVersionId);
+  return { ...result, job: { ...result.job, durationMs: Math.max(120000, completedMs), completedMs }, segments };
+}
+{
+  const e = create();
+  await signIn(e);
+  const segments = Array.from({ length: 40 }, (_, i) => ({
+    id: `s${i}`, startMs: i * 1000, endMs: i * 1000 + 900, text: `句 ${i}`,
+  }));
+  let contents = timedTranscript(segments, 40000);
+  e.setHandler((p, b, o) => p.endsWith('/transcript') ? contents : e.initialHandler(p, b, o));
+  e.account.setTranscriptOpen(true);
+  await settle();
+  const selectTo = end => e.account.setTranscriptSelectionRange('s5', end);
+  const selected = () => clone(e.account.getSnapshot().selectedSegmentIds);
+  selectTo('s5');
+  selectTo('s8');
+  assert.deepEqual(selected(), ['s5', 's6', 's7', 's8']);
+  selectTo('s6');
+  assert.deepEqual(selected(), ['s5', 's6']);
+  selectTo('s3');
+  assert.deepEqual(selected(), ['s3', 's4', 's5']);
+  selectTo('s36');
+  assert.deepEqual(selected(), segments.slice(5, 37).map(s => s.id));
+  selectTo('s37');
+  assert.deepEqual(selected(), segments.slice(5, 37).map(s => s.id));
+  contents = timedTranscript(segments.map(s => ({ ...s, text: '新文稿' })), 110000);
+  await e.account.refreshTranscript();
+  selectTo('s5');
+  selectTo('s5');
+  assert.deepEqual(selected(), ['s5']);
+  assert.equal(e.account.getSnapshot().transcriptSegments[5].text, '句 5');
+  e.account.askSelection();
+  assert.deepEqual(clone(e.account.draftAnchor), {
+    kind: 'transcript-selection', transcriptJobId: contents.job.id, throughMs: 40000, segmentIds: ['s5'],
+  });
+  e.account.release();
+  checks.push('drag selection extends, reverses, and contracts about its starting sentence with a frozen watermark and a 32-sentence bound');
+}
+{
+  const e = create();
+  await signIn(e);
+  const sentence = { id: 'jump-here', startMs: 35000, endMs: 36500, text: '从这里继续听' };
+  e.setHandler((p, b, o) => p.endsWith('/transcript') ? timedTranscript([sentence]) : e.initialHandler(p, b, o));
+  await e.account.takeover();
+  await e.player.pause();
+  e.account.setTranscriptOpen(true);
+  await settle();
+  await e.account.playTranscriptSegment(sentence.id);
+  await settle();
+  assert.equal(e.player.state.positionMs, sentence.startMs);
+  assert.equal(e.player.state.playerState, 'playing');
+  e.player.state.positionMs = sentence.endMs + 300;
+  e.player.emit();
+  await settle();
+  assert.equal(e.player.state.playerState, 'playing');
+  assert.equal(e.account.getSnapshot().replayReturnLabel, '');
+  e.account.release();
+  checks.push('tapping a paused current-episode sentence starts from its timestamp and continues past its end');
+}
+{
+  const e = create();
+  const { item } = await readingCitation(e);
+  e.account.setChatOpen(false);
+  await e.account.playTranscriptSegment('segment-media-a');
+  await settle();
+  const request = e.requests.filter(r => r.path.endsWith('/takeover')).at(-1);
+  assert.equal(request.body.mediaVersionId, item.mediaVersionId);
+  assert.equal(request.body.positionMs, 150000);
+  assert.equal(e.player.state.mediaVersionId, item.mediaVersionId);
+  assert.equal(e.player.state.positionMs, 150000);
+  assert.equal(e.player.state.playerState, 'playing');
+  assert.equal(e.account.getSnapshot().replayReturnLabel, '');
+  e.account.release();
+
+  const archived = create();
+  await signIn(archived);
+  archived.setHandler((path, body, options) => {
+    if (path === '/api/library') return { items: [libraryItem('archive', false)], usage };
+    if (path.endsWith('/chat')) return chat('archive', [], false);
+    if (path.endsWith('/transcript')) return transcript('archive');
+    return archived.initialHandler(path, body, options);
+  });
+  archived.account.setLibraryOpen(true);
+  await settle();
+  archived.account.selectReading('archive');
+  await settle();
+  assert.equal(archived.account.getSnapshot().transcriptSegments[0].id, 'segment-archive');
+  const calls = archived.calls.length;
+  await archived.account.playTranscriptSegment('segment-archive');
+  assert.deepEqual(archived.calls.slice(calls), []);
+  assert.equal(archived.requests.some(r => r.path.endsWith('/takeover')), false);
+  archived.account.release();
+  checks.push('sentence playback takes over the independent reading episode at the sentence and archived sentences leave the player alone');
+}
+
+{
+  const e = create();
+  const media = 'long-episode';
+  const pageOne = timedTranscript([
+    { id: 's1', startMs: 1000, endMs: 2000, text: '第一句' },
+    { id: 's2', startMs: 2000, endMs: 3000, text: '第二句' },
+    { id: 's3', startMs: 6000, endMs: 7000, text: '第三句' },
+  ], 240000, media);
+  pageOne.nextCursor = 4;
+  const pageTwo = timedTranscript([{ id: 'far', startMs: 180000, endMs: 183000, text: '另一页' }], 240000, media);
+  pageTwo.pageCursor = 5;
+  let pendingFollow;
+  const atRequests = () => e.requests.filter(r => r.path.endsWith('/transcript') && new URL(r.url).searchParams.has('at'));
+  e.setSnapshot({ ...e.getSnapshot(), mediaVersionId: media, contentId: 'long', durationMs: 240000, positionMs: 1000 });
+  e.setHandler((p, b, o) => {
+    if (p === `/api/media/${media}/transcript`) {
+      const query = new URL(e.requests.at(-1).url).searchParams;
+      if (pendingFollow && Number(query.get('at')) >= 180000) return pendingFollow.promise;
+      return Number(query.get('at')) >= 180000 || query.get('after') === '4' ? pageTwo : pageOne;
+    }
+    if (p === '/api/library') return { items: [libraryItem('independent', true)], usage };
+    if (p === '/api/media/independent/transcript') return transcript('independent');
+    if (p.endsWith('/chat')) return chat(p.split('/')[3]);
+    return e.initialHandler(p, b, o);
+  });
+  await signIn(e);
+  await e.account.takeover();
+  const page = createPage(e);
+  page.pageVisible = true;
+  page.scrollWindowY = 100;
+  page.scrollWindowHeight = 400;
+  let offset = 0;
+  const moves = [];
+  page.readerScroller = {
+    offset: () => ({ yOffset: offset }),
+    scrollTo: value => { offset = value.yOffset; moves.push(offset); },
+  };
+  page.showTranscript();
+  await settle();
+  page.recordSentenceArea('s1', { globalPosition: { y: 220 } });
+  page.recordSentenceArea('s2', { globalPosition: { y: 700 } });
+  const position = async value => {
+    e.player.state.positionMs = value;
+    e.player.emit();
+    await settle();
+  };
+  await position(1999);
+  assert.equal(page.activeSentenceId, 's1');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(moves.length, 0);
+  await position(2000);
+  assert.equal(page.activeSentenceId, 's2');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(moves.length, 1);
+  assert.ok(600 - offset >= 0 && 600 - offset < 400, 'the new sentence should be inside the reader viewport');
+  await position(3500);
+  assert.equal(page.activeSentenceId, '');
+  page.pauseTranscriptFollow();
+  const beforePause = atRequests().length;
+  await position(6200);
+  assert.equal(page.activeSentenceId, 's3');
+  await position(181000);
+  assert.equal(page.followTranscript, false);
+  assert.equal(atRequests().length, beforePause);
+  page.resumeTranscriptFollow();
+  await settle();
+  assert.equal(page.activeSentenceId, 'far');
+  assert.equal(atRequests().length, beforePause + 1);
+  await position(1500);
+  assert.equal(page.activeSentenceId, 's1');
+  pendingFollow = deferred();
+  await position(181500);
+  assert.equal(e.account.getSnapshot().transcriptBusy, true);
+  page.pauseTranscriptFollow();
+  pendingFollow.resolve(pageTwo);
+  await settle();
+  assert.equal(e.account.getSnapshot().transcriptBusy, false);
+  assert.equal(page.account.transcriptSegments[0].id, 's1', 'a late follow response must preserve the manually browsed page');
+  assert.equal(page.activeSentenceId, '');
+  e.account.setLibraryOpen(true);
+  await settle();
+  e.account.selectReading('independent');
+  await settle();
+  const beforeOther = atRequests().length;
+  page.resumeTranscriptFollow();
+  await position(181500);
+  assert.equal(page.activeSentenceId, '');
+  assert.equal(atRequests().length, beforeOther);
+  assert.equal(e.account.getSnapshot().readingMediaVersionId, 'independent');
+  page.aboutToDisappear();
+  e.account.release();
+  checks.push('live positions highlight half-open sentence ranges, keep silence clear, follow across pages in both directions, and respect manual reading and other episodes');
+}
+
+{
+  const file = new URL('../apps/harmony/entry/src/main/ets/components/TranscriptSentences.ets', import.meta.url);
+  const methods = fs.readFileSync(file, 'utf8').split('  build() {')[0]
+    .replace(/^import .*;$/gm, '').replace(/@Component\s*/g, '').replace(/@Prop\s+/g, '')
+    .replace('export struct TranscriptSentences', 'class TranscriptSentences');
+  const compiled = ts.transpileModule(methods + '}\nexports.Sentences=TranscriptSentences;', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const context = { exports: {}, setInterval, clearInterval };
+  vm.runInNewContext(compiled, context);
+  const rows = new context.exports.Sentences();
+  rows.canPlay = true;
+  rows.viewportTop = () => 120;
+  rows.viewportHeight = () => 500;
+  rows.scrollOffset = () => 80;
+  rows.segments = ['first', 'anchor', 'third', 'last'].map(id => ({ id }));
+  const selections = [], plays = [], toggles = [];
+  rows.onPlay = id => plays.push(id);
+  rows.onToggle = id => toggles.push(id);
+  rows.onSelect = (anchor, end) => selections.push([anchor, end]);
+  const heights = [50, 84, 48, 95];
+  let top = 180;
+  for (const [i, segment] of rows.segments.entries()) {
+    rows.recordRow(segment.id, { globalPosition: { y: top }, height: heights[i] });
+    top += heights[i];
+  }
+  rows.tap('first');
+  rows.startDrag('anchor');
+  const atY = globalY => rows.moveDrag({ fingerList: [{ globalY }] });
+  atY(410); atY(340); atY(210);
+  rows.finishDrag();
+  rows.tap('anchor');
+  assert.deepEqual(selections, [['anchor', 'anchor'], ['anchor', 'last'], ['anchor', 'third'], ['anchor', 'first']]);
+  assert.deepEqual(plays, ['first']);
+  assert.deepEqual(toggles, []);
+  rows.aboutToDisappear();
+  checks.push('long press and drag resolves variable-height rows above and below the anchor and suppresses the release click');
 }
 
  console.log(JSON.stringify({passed:true,checks},null,2));

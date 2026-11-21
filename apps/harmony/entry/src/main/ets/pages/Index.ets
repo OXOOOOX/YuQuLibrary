@@ -1,13 +1,15 @@
 import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { PrimaryTabs } from '../components/PrimaryTabs';
+import { TranscriptSentences } from '../components/TranscriptSentences';
 import { SearchResult, SearchHighlight, SavedItem } from '../services/KnowledgeTypes';
 import { Chapter } from '../services/ChapterTypes';
 import { SummaryPart, SummaryResult, SummaryEvidence, SummaryPoint, SummaryTopicOverview, SummaryTopic, SummaryTopicPoint } from '../services/SummaryTypes';
 import { PlaybackService, PlaybackViewState } from '../services/PlaybackService';
 import { ConnectionProbe, ProbeViewState } from '../services/ConnectionProbe';
-import { AccountSync, AccountViewState, LibraryItem, ImportJob, FeedEpisode, TranscriptSegment, ChatTurn, ChatCitation } from '../services/AccountSync';
+import { AccountSync, AccountViewState, LibraryItem, ImportJob, FeedEpisode, TranscriptJob, TranscriptSegment, ChatTurn, ChatCitation } from '../services/AccountSync';
 import { DEBUG } from 'BuildProfile';
 interface TextPiece { text: string; marked: boolean; }
+const PLAYER_BACK_SWIPE_DISTANCE: number = 64; // vp
 
 @Entry
 @Component
@@ -48,6 +50,18 @@ struct Index {
   private rates: number[] = [1, 1.25, 1.5, 2];
   private readerScroller: Scroller = new Scroller();
   private scrollWindowY: number = 0;
+  private scrollWindowHeight: number = 0;
+  @State private activeSentenceId: string = '';
+  @State private followTranscript: boolean = true;
+  @State private draggingSelection: boolean = false;
+  @State private sentenceSearchOpen: boolean = false;
+  private sentenceAnchor: string = '';
+  private sentenceTops: Map<string, number> = new Map<string, number>();
+  private lastFollowQuery: number = -1;
+  private lastFollowQueryTime: number = 0;
+  private alignedSentenceId: string = '';
+  private followTimer: number = 0;
+  private locatePausedSentence: boolean = false;
   private contextFocusId: string = '';
   private contextFocusTimer: number = 0;
   private searchScrollOffset: number = 0;
@@ -58,6 +72,129 @@ struct Index {
   private summaryFocusScope: string = '';
   private summaryFocusEpoch: number = 0;
   private summaryFocusTimer: number = 0;
+
+  private readingPlayback(state: AccountViewState): boolean {
+    return this.section === 'listen' && state.loggedIn && state.transcriptOpen && !state.chatOpen &&
+      state.mediaVersionId.length > 0 && (!state.readingMediaVersionId || state.readingMediaVersionId === state.mediaVersionId) &&
+      !state.readingArchived && state.audioAvailable;
+  }
+
+  private readingAudioAvailable(): boolean {
+    if (this.account.readingMediaVersionId && this.account.readingMediaVersionId !== this.account.mediaVersionId) {
+      return !this.account.readingArchived;
+    }
+    return !this.account.readingArchived && this.account.audioAvailable;
+  }
+
+  private toggleTranscriptTool(tool: string): void {
+    const account: AccountSync = AccountSync.getInstance();
+    const chapters: boolean = tool === 'chapters' && !this.account.chaptersOpen;
+    const summaries: boolean = tool === 'summaries' && !this.account.summariesOpen;
+    this.sentenceSearchOpen = tool === 'search' && !this.sentenceSearchOpen;
+    this.pauseTranscriptFollow();
+    this.contextFocusId = ''; this.restoreChapterScroll = false; this.restoreSearchScroll = false;
+    if (!this.sentenceSearchOpen && (this.account.searchView || this.account.searchBusy)) account.clearSearch();
+    if (this.account.chaptersOpen !== chapters) account.setChaptersOpen(chapters);
+    if (this.account.summariesOpen !== summaries) account.setSummariesOpen(summaries);
+  }
+
+  private canFollowSentence(state: AccountViewState): boolean {
+    return this.readingPlayback(state) && this.followTranscript && !this.accountOpen && !this.sentenceSearchOpen &&
+      !state.chaptersOpen && !state.summariesOpen && !state.searchView && !this.draggingSelection &&
+      state.selectedSegmentIds.length === 0 && (state.playing || this.locatePausedSentence);
+  }
+
+  private pauseTranscriptFollow(): void {
+    this.followTranscript = false;
+    this.locatePausedSentence = false;
+    this.alignedSentenceId = '';
+    this.lastFollowQuery = -1;
+    if (this.followTimer) clearTimeout(this.followTimer);
+    this.followTimer = 0;
+  }
+
+  private resumeTranscriptFollow(): void {
+    this.followTranscript = true;
+    this.locatePausedSentence = true;
+    this.alignedSentenceId = '';
+    this.lastFollowQuery = -1;
+    this.updateTranscriptPlayback(this.account);
+  }
+
+  private updateTranscriptPlayback(state: AccountViewState): void {
+    const current: TranscriptSegment | undefined = this.readingPlayback(state) ?
+      state.transcriptSegments.find((s: TranscriptSegment) => s.startMs <= state.positionMs && state.positionMs < s.endMs) : undefined;
+    const id: string = current?.id ?? '';
+    if (this.activeSentenceId !== id) this.activeSentenceId = id;
+    if (!this.canFollowSentence(state)) return;
+    if (id) {
+      this.lastFollowQuery = -1;
+      this.alignPlayingSentence();
+      return;
+    }
+    const job: TranscriptJob | null = state.transcriptJob;
+    if (!job || !state.transcriptLoaded || state.transcriptBusy || state.positionMs >= job.completedMs) return;
+    // Each transcript page owns five 30-second chunks. Silence inside it has no current sentence.
+    const chunk: number = Math.floor(state.positionMs / 30000);
+    // A sentence starting on the preceding page can extend into the first chunk on this page.
+    const first: TranscriptSegment | undefined = state.transcriptSegments[0];
+    const precedingPageMayOwnSentence: boolean = state.transcriptPageCursor >= 0 && chunk === state.transcriptPageCursor + 1 &&
+      (!first || state.positionMs < first.startMs);
+    if (chunk > state.transcriptPageCursor && chunk <= state.transcriptPageCursor + 5 && !precedingPageMayOwnSentence) return;
+    if (this.lastFollowQuery === chunk && (!state.transcriptError || Date.now() - this.lastFollowQueryTime < 10000)) return;
+    this.lastFollowQuery = chunk;
+    this.lastFollowQueryTime = Date.now();
+    void AccountSync.getInstance().refreshTranscript(false, state.positionMs, () =>
+      this.canFollowSentence(this.account) && Math.floor(this.account.positionMs / 30000) === chunk);
+  }
+
+  private alignPlayingSentence(): void {
+    const id: string = this.activeSentenceId;
+    if (!id || this.alignedSentenceId === id || this.followTimer || !this.pageVisible ||
+      this.scrollWindowHeight <= 0 || !this.sentenceTops.has(id)) return;
+    this.followTimer = setTimeout(() => {
+      this.followTimer = 0;
+      if (!this.pageVisible || !this.canFollowSentence(this.account)) return;
+      const currentId: string = this.activeSentenceId;
+      const measured: number | undefined = this.sentenceTops.get(currentId);
+      if (measured === undefined || !currentId) return;
+      const top: number = measured - this.scrollWindowY;
+      const relative: number = top - (this.readerScroller.offset()?.yOffset ?? 0);
+      if (relative < 8 || relative > this.scrollWindowHeight * 0.68) {
+        this.readerScroller.scrollTo({ xOffset: 0, yOffset: Math.max(0, top - this.scrollWindowHeight * 0.24), animation: false });
+      }
+      this.alignedSentenceId = currentId;
+      this.locatePausedSentence = false;
+    }, 0);
+  }
+
+  private recordSentenceArea(id: string, area: Area): void {
+    const top: number = Number(area.globalPosition.y) + (this.readerScroller.offset()?.yOffset ?? 0);
+    if (Number.isFinite(top)) this.sentenceTops.set(id, top);
+    this.alignSearchContext(id, area);
+    if (id === this.activeSentenceId && this.canFollowSentence(this.account)) this.alignPlayingSentence();
+  }
+
+  private async playSentence(id: string): Promise<void> {
+    this.pauseTranscriptFollow();
+    const account: AccountSync = AccountSync.getInstance();
+    if (await account.playTranscriptSegment(id) && this.readingPlayback(this.account) &&
+      this.account.transcriptSegments.some((s: TranscriptSegment) => s.id === id)) this.resumeTranscriptFollow();
+  }
+
+  private selectSentenceRange(anchor: string, end: string): void {
+    this.pauseTranscriptFollow();
+    this.sentenceAnchor = anchor;
+    AccountSync.getInstance().setTranscriptSelectionRange(anchor, end);
+  }
+
+  private tapSelectedSentence(id: string): void {
+    if (this.account.selectedSegmentIds.length === 1 && this.account.selectedSegmentIds[0] === id) {
+      AccountSync.getInstance().clearSelection();
+    } else {
+      this.selectSentenceRange(this.sentenceAnchor || this.account.selectedSegmentIds[0], id);
+    }
+  }
 
   private openChapterContext(chapter: Chapter): void {
     this.clearSummaryFocus();
@@ -182,6 +319,20 @@ struct Index {
       this.probeState = state;
     });
     this.unsubscribeAccount = AccountSync.getInstance().subscribe((state: AccountViewState) => {
+      const readingChanged: boolean = (state.readingMediaVersionId || state.mediaVersionId) !==
+        (this.account.readingMediaVersionId || this.account.mediaVersionId);
+      if (readingChanged || state.transcriptJob?.id !== this.account.transcriptJob?.id ||
+        !state.transcriptOpen || state.transcriptPageCursor !== this.account.transcriptPageCursor) {
+        this.sentenceTops.clear();
+        this.alignedSentenceId = '';
+      }
+      if (readingChanged || !state.loggedIn) {
+        this.followTranscript = true;
+        this.lastFollowQuery = -1;
+        this.locatePausedSentence = false;
+        this.sentenceSearchOpen = false;
+      }
+      if (state.selectedSegmentIds.length === 0) this.sentenceAnchor = '';
       if (this.summaryFocusScope.length > 0 && (!state.loggedIn || !state.transcriptOpen || !state.summariesOpen ||
         this.summaryFocusScope !== this.summaryTopicScope(state, state.summaryTopicIndex))) this.clearSummaryFocus();
       if ((state.readingMediaVersionId || state.mediaVersionId) !==
@@ -204,12 +355,15 @@ struct Index {
         ((last.id !== previous.id && (this.chatAtBottom || this.account.chatBusy)) ||
         (this.chatAtBottom && last.status !== previous.status))) this.chatScrollTarget = 'latest';
       this.account = state;
+      this.updateTranscriptPlayback(state);
       if (!this.dragging) this.seekValue = state.positionMs;
       if (state.loggedIn) this.serverUrl = state.baseUrl;
     });
   }
 
   aboutToDisappear(): void {
+    this.pauseTranscriptFollow();
+    this.sentenceTops.clear();
     this.clearSummaryFocus();
     if (this.contextFocusTimer > 0) clearTimeout(this.contextFocusTimer);
     this.contextFocusTimer = 0;
@@ -341,9 +495,8 @@ struct Index {
 
   private sectionTitle(): string {
     if (!this.account.loggedIn) return '鱼趣知识库';
-    if (this.section === 'library') return '资料库';
-    if (this.section === 'saved') return '收藏';
-    return this.account.chatOpen ? '文稿对话' : '收听';
+    if (this.section === 'library' || this.section === 'saved') return '资料库';
+    return this.section === 'chat' ? '文稿对话' : '收听';
   }
 
   onBackPress(): boolean {
@@ -351,11 +504,27 @@ struct Index {
     if (this.chatOptionsOpen) { this.chatOptionsOpen = false; return true; }
     if (this.accountOpen) { this.accountOpen = false; return true; }
     if (this.importOpen) { this.importOpen = false; return true; }
-    if (this.account.chatOpen && this.section === 'listen') { this.showTranscript(); return true; }
+    if (this.section === 'chat') { this.showTranscript(); return true; }
+    if (this.section === 'listen' && this.account.selectedSegmentIds.length > 0) {
+      AccountSync.getInstance().clearSelection(); return true;
+    }
     if (this.account.chapterContext !== null && this.section === 'listen') { this.returnToChapters(); return true; }
     if (this.account.searchView === 'context' && this.section === 'listen') { this.returnToSearch(); return true; }
-    if (this.section !== 'listen') { this.switchSection('listen'); return true; }
+    if (this.section === 'saved') { this.switchSection('library'); return true; }
+    if (this.account.loggedIn && this.section === 'listen') { this.switchSection('library'); return true; }
     return false;
+  }
+
+  private canSwipeBackFromPlayer(): boolean {
+    return this.account.loggedIn && this.section === 'listen' && !this.account.chatOpen && !this.accountOpen &&
+      !this.draggingSelection && this.account.selectedSegmentIds.length === 0;
+  }
+
+  private finishPlayerSwipe(event: GestureEvent): void {
+    const distanceLeft: number = -event.offsetX;
+    if (this.canSwipeBackFromPlayer() && distanceLeft >= PLAYER_BACK_SWIPE_DISTANCE && distanceLeft > Math.abs(event.offsetY)) {
+      this.onBackPress();
+    }
   }
 
   private returnToSearch(): void {
@@ -375,27 +544,26 @@ struct Index {
   }
 
   private switchSection(section: string): void {
-    if (this.section !== section && this.pageVisible) this.readerScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+    if (this.section !== 'chat' && section !== 'chat' && this.section !== section && this.pageVisible) {
+      this.readerScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+    }
+    if (section === 'chat') this.chatScrollTarget = 'latest';
+    else {
+      this.inputFocused = false; this.chatOptionsOpen = false; this.citationSheetOpen = false;
+    }
     this.importOpen = false;
     this.section = section; this.showLibrary = section === 'library';
     AccountSync.getInstance().setLibraryOpen(this.showLibrary);
     AccountSync.getInstance().setSavedOpen(section === 'saved', this.account.savedThisEpisode);
-    if (section !== 'listen') {
-      AccountSync.getInstance().setTranscriptOpen(false); AccountSync.getInstance().setChatOpen(false);
-    } else { AccountSync.getInstance().setChatOpen(false); AccountSync.getInstance().setTranscriptOpen(true); }
+    if (section !== 'chat') AccountSync.getInstance().setChatOpen(false);
+    AccountSync.getInstance().setTranscriptOpen(section === 'listen');
+    if (section === 'chat' && !this.account.chatOpen) AccountSync.getInstance().setChatOpen(true);
   }
   private showChat(): void {
-    this.chatScrollTarget = 'latest';
-    this.section = 'listen'; this.showLibrary = false; AccountSync.getInstance().setLibraryOpen(false);
-    AccountSync.getInstance().setSavedOpen(false); AccountSync.getInstance().setTranscriptOpen(false);
-    AccountSync.getInstance().setChatOpen(true);
+    this.switchSection('chat');
   }
   private showTranscript(): void {
-    if (this.section !== 'listen' && this.pageVisible) this.readerScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
-    this.inputFocused = false; this.chatOptionsOpen = false; this.citationSheetOpen = false;
-    this.section = 'listen'; this.showLibrary = false; AccountSync.getInstance().setLibraryOpen(false);
-    AccountSync.getInstance().setSavedOpen(false); AccountSync.getInstance().setChatOpen(false);
-    AccountSync.getInstance().setTranscriptOpen(true);
+    this.switchSection('listen');
   }
   private highlighted(result: SearchResult): TextPiece[] {
     const pieces: TextPiece[] = []; let from: number = 0;
@@ -452,9 +620,6 @@ struct Index {
   build() {
     Column() {
       Row({ space: 10 }) {
-        if (this.account.loggedIn && this.section === 'listen' && this.account.chatOpen) {
-          Button('返回').quietAction().id('chat-back').onClick(() => { this.showTranscript(); })
-        }
         Text(this.sectionTitle()).fontSize(24).fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.yuqu_ink')).layoutWeight(1)
         Button(this.account.loggedIn ? '账户' : '邮箱登录').quietAction().id('account-open')
@@ -466,7 +631,13 @@ struct Index {
         Text(this.account.error).fontSize(13).fontColor($r('app.color.yuqu_danger')).width('100%')
           .padding({ left: 18, right: 18, bottom: 4 })
       }
-      if (this.account.loggedIn && this.section === 'listen' && this.account.chatOpen) {
+      if (this.account.loggedIn && this.section === 'chat' &&
+        this.account.readingMediaVersionId.length === 0 && this.account.mediaVersionId.length === 0) {
+        Column({ space: 12 }) {
+          Text('先在资料库选择一期节目，再围绕文稿提问。').fontSize(15).fontColor($r('app.color.yuqu_muted'))
+          Button('打开资料库').quietAction().onClick(() => { this.switchSection('library'); })
+        }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+      } else if (this.account.loggedIn && this.section === 'chat') {
         this.miniPlayer()
         Scroll(this.chatScroller) {
           this.chatHistory()
@@ -483,6 +654,9 @@ struct Index {
             showClose: true, title: { title: '引用原文' }, backgroundColor: $r('app.color.yuqu_surface') })
         this.chatComposer()
       } else {
+        if (this.account.loggedIn && (this.section === 'library' || this.section === 'saved')) {
+          this.libraryTabs()
+        }
         if (this.account.loggedIn && this.section === 'listen' && this.account.chapterContext !== null) {
           Button('返回章节目录').quietAction().id('chapters-return').width('94%')
             .onClick(() => { this.returnToChapters(); })
@@ -505,17 +679,33 @@ struct Index {
             }
           }.padding({ left: 16, right: 16, top: 6, bottom: 20 }).width('100%')
         }.width('100%').layoutWeight(1).align(Alignment.TopStart)
-          .onAreaChange((_old: Area, area: Area) => { this.scrollWindowY = Number(area.globalPosition.y); })
+          .enableScrollInteraction(!this.draggingSelection)
+          .onWillScroll((_x: number, _y: number, _state: ScrollState, source: ScrollSource) => {
+            if (this.followTranscript && this.account.transcriptOpen && (source === ScrollSource.DRAG ||
+              source === ScrollSource.SCROLL_BAR || source === ScrollSource.OTHER_USER_INPUT)) this.pauseTranscriptFollow();
+          })
+          .onAreaChange((_old: Area, area: Area) => {
+            this.scrollWindowY = Number(area.globalPosition.y);
+            this.scrollWindowHeight = Number(area.height);
+            if (this.canFollowSentence(this.account)) this.alignPlayingSentence();
+          })
         if (this.account.loggedIn) {
           if (this.section !== 'listen') {
             this.miniPlayer()
           } else if (this.account.replayReturnLabel.length > 0) {
             this.replayActions()
           }
-          PrimaryTabs({ section: this.section, onSelect: (next: string) => { this.switchSection(next); } })
+          if (this.section === 'listen' && this.account.transcriptOpen && this.account.searchView !== 'results' &&
+            this.account.transcriptJob !== null) this.transcriptToolbar()
         }
       }
+      if (this.account.loggedIn) {
+        PrimaryTabs({ section: this.section === 'saved' ? 'library' : this.section,
+          onSelect: (next: string) => { this.switchSection(next); } })
+      }
     }.width('100%').height('100%').backgroundColor($r('app.color.yuqu_page'))
+      .gesture(PanGesture({ fingers: 1, direction: this.canSwipeBackFromPlayer() ? PanDirection.Left : PanDirection.None,
+        distance: PLAYER_BACK_SWIPE_DISTANCE }).onActionEnd((event: GestureEvent) => { this.finishPlayerSwipe(event); }))
       .onAppear(() => { this.pageVisible = true; this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE); })
       .onDisAppear(() => { this.pageVisible = false; })
   }
@@ -650,17 +840,24 @@ struct Index {
             this.dragging = true;
           }
         })
-      Row({ space: 12 }) {
-        Button('后退 15 秒').quietAction().layoutWeight(1)
+      Row({ space: 6 }) {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.gobackward_15')).fontSize(28).fontColor([$r('app.color.yuqu_ink')])
+        }.quietAction().playerAction(1).accessibilityText('后退15秒')
           .id('playback-back').enabled(this.canControl())
           .onClick(() => { void AccountSync.getInstance().seek(this.viewState.positionMs - 15000); })
-        Button(this.playbackActionLabel()).quietAction().layoutWeight(1)
+        Button(this.playbackActionLabel()).quietAction().playerAction(1)
           .backgroundColor($r('app.color.yuqu_primary')).fontColor($r('app.color.yuqu_on_primary'))
           .id('playback-toggle').enabled(this.viewState.recovering || this.canControl() || this.canRetryPlayback())
           .onClick(() => { this.togglePlayback(); })
-        Button('前进 15 秒').quietAction().layoutWeight(1)
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.goforward_15')).fontSize(28).fontColor([$r('app.color.yuqu_ink')])
+        }.quietAction().playerAction(1).accessibilityText('前进15秒')
           .id('playback-forward').enabled(this.canControl())
           .onClick(() => { void AccountSync.getInstance().seek(this.viewState.positionMs + 15000); })
+        Button(`${this.account.speed}× ${this.account.looping ? '循环' : '设置'}`).quietAction().playerAction(1.25).id('player-settings')
+          .accessibilityText(`播放设置，${this.account.speed} 倍速，循环${this.account.looping ? '开启' : '关闭'}`)
+          .onClick(() => { this.showPlayerOptions = !this.showPlayerOptions; })
       }.width('100%')
       if (this.account.loggedIn && !this.account.owner) {
         Button('在此设备播放').quietAction().id('listen-takeover').enabled(!this.account.busy && this.account.audioAvailable && this.account.mediaVersionId.length > 0)
@@ -670,8 +867,6 @@ struct Index {
         this.account.mediaVersionId === this.viewState.mediaVersionId) {
         this.diagnosticPrompt('playback')
       }
-      Button(`${this.account.speed}× · ${this.account.looping ? '循环播放' : '播放设置'}`).quietAction().id('player-settings')
-        .onClick(() => { this.showPlayerOptions = !this.showPlayerOptions; })
       if (this.showPlayerOptions) {
         Row({ space: 8 }) {
           ForEach(this.rates, (rate: number) => {
@@ -719,14 +914,13 @@ struct Index {
           .onClick(() => { AccountSync.getInstance().returnToCurrent(); })
       }.padding(16).width('100%').alignItems(HorizontalAlign.Start).backgroundColor($r('app.color.yuqu_subtle')).borderRadius(16)
     }
-    Row({ space: 8 }) {
-      Button('文稿').quietAction().id('transcript-toggle').layoutWeight(1)
-        .backgroundColor(this.account.transcriptOpen ? $r('app.color.yuqu_accent_soft') : $r('app.color.yuqu_surface'))
-        .onClick(() => { this.showTranscript(); })
-      Button('对话').quietAction().id('chat-toggle').layoutWeight(1)
-        .backgroundColor($r('app.color.yuqu_surface'))
-        .onClick(() => { this.showChat(); })
-    }.width('100%')
+    if (!this.account.transcriptOpen) {
+      Button('查看文稿').quietAction().id('transcript-toggle').width('100%')
+        .onClick(() => {
+          this.showTranscript();
+          if (this.readingPlayback(this.account)) this.resumeTranscriptFollow();
+        })
+    }
   }
 
   @Builder
@@ -765,17 +959,39 @@ struct Index {
   }
 
   @Builder
+  private transcriptToolbar() {
+    if (this.account.selectedSegmentIds.length > 0) {
+      Row({ space: 6 }) {
+        Text(`已选 ${this.account.selectedSegmentIds.length} 句`).layoutWeight(1).fontSize(14).fontWeight(FontWeight.Medium)
+        Button('提问').quietAction().id('selection-ask')
+          .onClick(() => { AccountSync.getInstance().askSelection(); this.showChat(); })
+        Button('收藏').quietAction().id('selection-save').enabled(!this.account.savedBusy)
+          .onClick(() => { void AccountSync.getInstance().saveSelection(); })
+        Button('取消').quietAction().id('selection-cancel').onClick(() => { AccountSync.getInstance().clearSelection(); })
+      }.width('100%').padding({ left: 16, right: 16, top: 4, bottom: 4 })
+    } else if (this.readingPlayback(this.account) && !this.account.chaptersOpen && !this.account.summariesOpen &&
+      !this.sentenceSearchOpen && !this.account.searchView) {
+      Row({ space: 8 }) {
+        Text(`${this.account.playing ? '播放至' : '停在'} ${this.formatTime(this.account.positionMs)}`).fontSize(14).layoutWeight(1)
+        Button(this.followTranscript ? '跟读中' : '跟随播放').quietAction().id('transcript-follow')
+          .accessibilityText(this.followTranscript ? '暂停文稿自动滚动' : '回到播放位置并跟读')
+          .onClick(() => { if (this.followTranscript) this.pauseTranscriptFollow(); else this.resumeTranscriptFollow(); })
+      }.width('100%').padding({ left: 16, right: 16, top: 4, bottom: 4 })
+    }
+  }
+
+  @Builder
   private transcriptPanel() {
     Column({ space: 12 }) {
       Row({ space: 8 }) {
         Text(this.transcriptStatus()).id('transcript-status').fontSize(16).layoutWeight(1)
-        Button(this.account.readingMediaVersionId.length > 0 ? '从头查看' : '当前附近').quietAction().id('transcript-current').enabled(!this.account.transcriptBusy)
-          .onClick(() => { AccountSync.getInstance().transcriptNearCurrent(); })
+        if (this.account.transcriptJob !== null) {
+          Text(this.account.transcriptJob.sourceLabel ?? '自动转写').fontSize(12).fontColor($r('app.color.yuqu_muted'))
+        }
       }.width('100%')
       if (this.account.transcriptJob !== null) {
-        Text(`已处理至 ${this.formatTime(this.account.transcriptJob.completedMs)} / ${this.formatTime(this.account.transcriptJob.durationMs)}`)
+        if (this.account.transcriptJob.status !== 'ready') Text(`已处理至 ${this.formatTime(this.account.transcriptJob.completedMs)} / ${this.formatTime(this.account.transcriptJob.durationMs)}`)
           .id('transcript-progress').fontSize(13).fontColor($r('app.color.yuqu_muted'))
-        Text(this.account.transcriptJob.sourceLabel ?? '自动转写，内容可能有误').fontSize(12).fontColor($r('app.color.yuqu_muted'))
         if (this.account.transcriptJob.error !== null) {
           Text(this.account.transcriptJob.error).fontSize(13).fontColor($r('app.color.yuqu_danger'))
         }
@@ -790,10 +1006,14 @@ struct Index {
       if (this.account.transcriptError.length > 0) {
         Text(this.account.transcriptError).id('transcript-error').fontSize(13).fontColor($r('app.color.yuqu_danger'))
       }
-      Button(this.account.chaptersOpen ? '收起章节' : '章节').quietAction().id('chapters-toggle')
-        .onClick(() => { this.contextFocusId = ''; this.restoreChapterScroll = false; AccountSync.getInstance().setChaptersOpen(!this.account.chaptersOpen); })
-      Button(this.account.summariesOpen ? '收起总结' : '分段与整期总结').quietAction().id('summaries-toggle')
-        .onClick(() => { AccountSync.getInstance().setSummariesOpen(!this.account.summariesOpen); })
+      Row({ space: 6 }) {
+        Button(this.account.chaptersOpen ? '收起章节' : '章节').quietAction().id('chapters-toggle').layoutWeight(1)
+          .onClick(() => { this.toggleTranscriptTool('chapters'); })
+        Button(this.account.summariesOpen ? '收起总结' : '总结').quietAction().id('summaries-toggle').layoutWeight(1)
+          .onClick(() => { this.toggleTranscriptTool('summaries'); })
+        Button(this.sentenceSearchOpen ? '收起搜索' : '搜索').quietAction().id('transcript-search-toggle').layoutWeight(1)
+          .onClick(() => { this.toggleTranscriptTool('search'); })
+      }.width('100%')
       if (this.account.chaptersOpen) {
         Column({ space: 10 }) {
           Text('AI 根据整期文稿整理，可返回原文核对。').fontSize(12).fontColor($r('app.color.yuqu_muted'))
@@ -913,11 +1133,15 @@ struct Index {
           }
         }.width('100%').alignItems(HorizontalAlign.Start).padding(10).backgroundColor($r('app.color.yuqu_surface')).borderRadius(10)
       }
-      TextInput({ text: this.searchText, placeholder: '搜索本集已完成文稿' }).id('transcript-search-input')
-        .onChange((value: string) => { this.searchText = value; })
-      Button(this.account.searchBusy ? '正在搜索…' : '搜索全文').quietAction().id('transcript-search')
-        .enabled(!this.account.searchBusy && this.searchText.trim().length > 0)
-        .onClick(() => { this.contextFocusId = ''; this.restoreSearchScroll = false; void AccountSync.getInstance().searchTranscript(this.searchText); })
+      if (this.sentenceSearchOpen) {
+        Row({ space: 8 }) {
+          TextInput({ text: this.searchText, placeholder: '搜索本集文稿' }).id('transcript-search-input').layoutWeight(1)
+            .onChange((value: string) => { this.searchText = value; })
+          Button(this.account.searchBusy ? '搜索中' : '搜索').quietAction().id('transcript-search')
+            .enabled(!this.account.searchBusy && this.searchText.trim().length > 0)
+            .onClick(() => { this.contextFocusId = ''; this.restoreSearchScroll = false; void AccountSync.getInstance().searchTranscript(this.searchText); })
+        }.width('100%')
+      }
       if (this.account.searchError.length > 0) Text(this.account.searchError).fontSize(12).fontColor($r('app.color.yuqu_danger'))
       if (this.account.searchView === 'context') {
         Text(`查看 ${this.formatTime(this.account.searchContextMs)} 附近的上下文`).fontSize(15).fontWeight(FontWeight.Medium)
@@ -931,7 +1155,7 @@ struct Index {
       if (this.account.searchView === 'results') {
         Column({ space: 12 }) {
         Text(`搜索“${this.account.searchQuery}” · 已显示 ${this.account.searchResults.length} 处 · 截至 ${this.formatTime(this.account.searchThroughMs)}`).fontSize(12)
-        Button('返回文稿').quietAction().onClick(() => { AccountSync.getInstance().clearSearch(); })
+        Button('返回文稿').quietAction().onClick(() => { this.sentenceSearchOpen = false; AccountSync.getInstance().clearSearch(); })
         if (!this.account.searchBusy && this.account.searchResults.length === 0 && this.account.searchError.length === 0) Text('没有找到匹配片段').fontSize(13)
         ForEach(this.account.searchResults, (result: SearchResult) => {
           Column({ space: 6 }) {
@@ -962,30 +1186,25 @@ struct Index {
         })
       }
       if (this.account.searchView !== 'results') {
-      if (this.account.selectedSegmentIds.length > 0) {
-        Text(`已固定选择 ${this.account.selectedSegmentIds.length} 段，点击其他句可扩展连续范围`).fontSize(12)
-        Row({ space: 6 }) {
-          Button('问选中片段').quietAction().fontSize(12).layoutWeight(1).onClick(() => { AccountSync.getInstance().askSelection(); this.showChat(); })
-          Button('收藏片段').quietAction().fontSize(12).layoutWeight(1).enabled(!this.account.savedBusy)
-            .onClick(() => { void AccountSync.getInstance().saveSelection(); })
-          Button('取消选择').quietAction().fontSize(12).layoutWeight(1).onClick(() => { AccountSync.getInstance().clearSelection(); })
-        }.width('100%')
-      }
       if (this.account.savedError.length > 0) Text(this.account.savedError).fontSize(12).fontColor($r('app.color.yuqu_danger'))
-      ForEach(this.account.transcriptSegments, (segment: TranscriptSegment) => {
-        Column({ space: 4 }) {
-          Button(`${this.account.selectedSegmentIds.includes(segment.id) ? '已选' : '选择'} ${this.formatTime(segment.startMs)}`).quietAction().fontSize(12)
-            .backgroundColor(this.account.selectedSegmentIds.includes(segment.id) ? $r('app.color.yuqu_accent_soft') : $r('app.color.yuqu_subtle'))
-            .onClick(() => { AccountSync.getInstance().toggleSegment(segment.id); })
-          Text(`${this.formatTime(segment.startMs)}–${this.formatTime(segment.endMs)}`)
-            .fontSize(12).fontColor($r('app.color.yuqu_muted'))
-          Text(segment.text).fontSize(15).fontColor($r('app.color.yuqu_ink')).width('100%')
-          if (this.account.searchContextId === segment.id) Text('搜索命中').fontSize(12).fontColor($r('app.color.yuqu_ink'))
-          if (this.account.chapterContext?.startSegmentId === segment.id) Text('章节起点').fontSize(12).fontColor($r('app.color.yuqu_ink'))
-        }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 8, bottom: 8 })
-          .backgroundColor(this.account.searchContextId === segment.id || this.account.chapterContext?.startSegmentId === segment.id ? $r('app.color.yuqu_subtle') : $r('app.color.yuqu_surface'))
-          .onAreaChange((_old: Area, area: Area) => { this.alignSearchContext(segment.id, area); })
-      }, (segment: TranscriptSegment) => `${segment.id}:${segment.text}:${this.account.selectedSegmentIds.includes(segment.id)}:${this.account.searchContextId === segment.id ? this.account.searchContextRevision : 0}:${this.account.chapterContext?.startSegmentId === segment.id ? this.account.chapterContextRevision : 0}`)
+      if (this.account.transcriptSegments.length > 0) {
+        Text(this.readingAudioAvailable() ? '点句播放 · 长按后上下拖动可多选' : '长按一句，上下拖动可多选')
+          .fontSize(12).fontColor($r('app.color.yuqu_muted'))
+        TranscriptSentences({
+          segments: this.account.transcriptSegments, selectedIds: this.account.selectedSegmentIds, activeId: this.activeSentenceId,
+          searchId: this.account.searchContextId, chapterId: this.account.chapterContext?.startSegmentId ?? '',
+          contextRevision: this.account.searchContextRevision + this.account.chapterContextRevision,
+          canPlay: !this.account.busy && this.readingAudioAvailable(),
+          onPlay: (id: string) => { void this.playSentence(id); },
+          onSelect: (anchor: string, end: string) => { this.selectSentenceRange(anchor, end); },
+          onToggle: (id: string) => { this.tapSelectedSentence(id); },
+          onDrag: (active: boolean) => { this.draggingSelection = active; },
+          onRowArea: (id: string, area: Area) => { this.recordSentenceArea(id, area); },
+          viewportTop: () => this.scrollWindowY, viewportHeight: () => this.scrollWindowHeight,
+          scrollOffset: () => this.readerScroller.offset()?.yOffset ?? 0,
+          onEdgeScroll: (dy: number) => { this.readerScroller.scrollBy(0, dy); }
+        })
+      }
       if (this.account.transcriptLoaded && this.account.transcriptJob !== null && this.account.transcriptSegments.length === 0) {
         Text(this.account.transcriptJob.status === 'ready' ||
           this.account.transcriptJob.completedMs > (this.account.transcriptPageCursor + 1) * 30000 ?
@@ -994,12 +1213,17 @@ struct Index {
       }
       if (this.account.transcriptJob !== null) {
         Row({ space: 8 }) {
+          if (this.account.readingMediaVersionId && this.account.readingMediaVersionId !== this.account.mediaVersionId &&
+            this.account.transcriptCanPrevious) {
+            Button('从头查看').quietAction().id('transcript-current').enabled(!this.account.transcriptBusy)
+              .onClick(() => { AccountSync.getInstance().transcriptNearCurrent(); })
+          }
           Button('上一段').quietAction().id('transcript-previous').layoutWeight(1)
             .enabled(!this.account.transcriptBusy && this.account.transcriptCanPrevious)
-            .onClick(() => { AccountSync.getInstance().previousTranscriptPage(); })
+            .onClick(() => { this.pauseTranscriptFollow(); AccountSync.getInstance().previousTranscriptPage(); })
           Button('下一段').quietAction().id('transcript-next').layoutWeight(1)
             .enabled(!this.account.transcriptBusy && this.account.transcriptCanNext)
-            .onClick(() => { AccountSync.getInstance().nextTranscriptPage(); })
+            .onClick(() => { this.pauseTranscriptFollow(); AccountSync.getInstance().nextTranscriptPage(); })
         }.width('100%')
         Text(`从 ${this.formatTime(Math.max(0, this.account.transcriptPageCursor + 1) * 30000)} 开始${this.account.transcriptBusy ? ' · 更新中' : ''}`)
           .fontSize(12).fontColor($r('app.color.yuqu_muted'))
@@ -1281,6 +1505,24 @@ struct Index {
       }
     }.padding({ left: 14, right: 14, top: 4, bottom: 8 }).width('100%').alignItems(HorizontalAlign.Start)
       .backgroundColor($r('app.color.yuqu_surface')).border({ width: { top: 0.5 }, color: $r('app.color.yuqu_line') })
+  }
+
+  @Builder
+  private libraryTab(section: string, title: string, id: string) {
+    Button(title).quietAction().id(id).layoutWeight(1)
+      .fontColor(this.section === section ? $r('app.color.yuqu_accent_ink') : $r('app.color.yuqu_muted'))
+      .backgroundColor(this.section === section ? $r('app.color.yuqu_accent_soft') : $r('app.color.yuqu_surface'))
+      .accessibilitySelected(this.section === section)
+      .onClick(() => { if (this.section !== section) this.switchSection(section); })
+  }
+
+  @Builder
+  private libraryTabs() {
+    Row({ space: 4 }) {
+      this.libraryTab('library', '节目', 'library-episodes')
+      this.libraryTab('saved', '收藏', 'library-saved')
+    }.width('100%').padding({ left: 16, right: 16, top: 2, bottom: 6 })
+      .accessibilityRole(AccessibilityRoleType.TAB_BAR)
   }
 
   @Builder
@@ -1580,4 +1822,11 @@ struct Index {
   .constraintSize({ minHeight: 40 })
   .padding({ left: 12, right: 12 })
   .borderRadius(12)
+}
+
+@Extend(Button) function playerAction(weight: number) {
+  .layoutWeight(weight)
+  .padding({ left: 4, right: 4 })
+  .constraintSize({ minHeight: 44 })
+  .labelStyle({ maxLines: 1, minFontSize: 12, maxFontSize: 14 })
 }

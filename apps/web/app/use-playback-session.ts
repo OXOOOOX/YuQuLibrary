@@ -72,7 +72,7 @@ export function usePlaybackSession(player: RefObject<HTMLAudioElement | null>) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [connection, setConnection] = useState('未登录，仅在本机试听');
-  const [now, setNow] = useState(0);
+  const [now, setNow] = useState(Date.now);
   const [local, setLocal] = useState({ position: 0, duration: 120, speed: 1, looping: true, playing: false });
   const accountRef = useRef<AccountSession | null>(null);
   const snapshotRef = useRef<SyncedPlayback | null>(null);
@@ -440,10 +440,10 @@ export function usePlaybackSession(player: RefObject<HTMLAudioElement | null>) {
     }
   }
 
-  async function playHere(mediaVersionId?: string, positionMs?: number): Promise<void> {
-    if (takingOver.current !== null) return;
+  async function playHere(mediaVersionId?: string, positionMs?: number): Promise<boolean> {
+    if (takingOver.current !== null) return false;
     if (mediaVersionId || pendingRestore.current) clearReturnPoint();
-    await activateHere(mediaVersionId, positionMs);
+    return (await activateHere(mediaVersionId, positionMs)) !== null;
   }
 
   async function replayCitation(mediaVersionId: string, startMs: number, endMs: number): Promise<void> {
@@ -629,11 +629,23 @@ export function usePlaybackSession(player: RefObject<HTMLAudioElement | null>) {
   const own = !!account && !!activation && snapshot?.ownerSessionId === account.session.id &&
     activation.generation === snapshot.generation && activation.playbackSessionId === snapshot.playbackSessionId;
   const following = !!account && !own;
+  const elapsed = snapshot ? Math.max(0, now - Date.parse(snapshot.updatedAt)) : 0;
+  const stale = !!account && snapshot?.state === 'playing' && elapsed > 10000;
+  const projecting = following && snapshot?.state === 'playing' && !stale;
+  useEffect(() => {
+    if (!projecting) return;
+    // A display-only clock. Uploads stay on the owner's existing reporting interval.
+    const timer = setInterval(() => { if (!document.hidden) setNow(Date.now()); }, 200);
+    const refresh = () => { if (!document.hidden) setNow(Date.now()); };
+    refresh(); document.addEventListener('visibilitychange', refresh);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', refresh); };
+  }, [projecting]);
+  const projectedMs = (snapshot?.positionMs ?? 0) + (projecting && !busy && Number.isFinite(elapsed) ? elapsed * snapshot!.speed : 0);
   const view = (following || busy) && snapshot ? {
-    position: snapshot.positionMs / 1000, duration: snapshot.durationMs / 1000, speed: snapshot.speed,
+    position: (snapshot.looping && snapshot.durationMs > 0 ? projectedMs % snapshot.durationMs : Math.min(projectedMs, snapshot.durationMs)) / 1000,
+    duration: snapshot.durationMs / 1000, speed: snapshot.speed,
     looping: snapshot.looping, playing: snapshot.state === 'playing'
   } : local;
-  const stale = !!account && !!snapshot && snapshot.state === 'playing' && now - Date.parse(snapshot.updatedAt) > 10000;
   return { account, snapshot, loading, busy, error, setError, connection, own, following, view, stale,
     canControl: !loading && (!account || own), mediaChanged, playHere, seek, setSpeed, setLooping,
     requestCode, verifyCode, logout, reconnect, refreshPlayback, replayCitation, restorePlayback, continuePlayback, returnPoint, clearReturnPoint };

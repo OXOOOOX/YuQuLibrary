@@ -157,6 +157,61 @@ async function enterReplay(harness) {
   return { generation: harness.api.returnPoint.generation, playbackSessionId: harness.api.returnPoint.playbackSessionId };
 }
 
+test('web follows the phone silently and an explicit sentence tap starts continuous playback at its timestamp', async () => {
+  const harness = await createHarness();
+  try {
+    const phone = snapshot({ revision: 2, generation: 2, ownerSessionId: 'phone', playbackSessionId: 'on-phone', state: 'playing', positionMs: 15000 });
+    harness.emitPlayback(phone); await harness.settle();
+    assert.equal(harness.api.following, true);
+    assert.equal(harness.audio.paused, true);
+    assert.deepEqual(harness.requests, []);
+
+    const accepted = await harness.api.playHere('media-a', 32000);
+    await harness.settle();
+    assert.equal(accepted, true);
+    assert.equal(harness.requests.length, 1);
+    assert.equal(harness.requests[0].expectedGeneration, phone.generation);
+    assert.equal(harness.requests[0].mediaVersionId, 'media-a');
+    assert.equal(harness.requests[0].positionMs, 32000);
+    assert.equal(harness.audio.currentTime, 32);
+    assert.equal(harness.audio.paused, false);
+    harness.audio.currentTime = 37;
+    harness.api.mediaChanged();
+    assert.equal(harness.audio.paused, false);
+    assert.equal(harness.api.returnPoint, null);
+
+    harness.emitPlayback({ ...phone, revision: 4, generation: 4 });
+    await harness.settle();
+    assert.equal(harness.audio.paused, true);
+    assert.equal(harness.api.following, true);
+    assert.equal(harness.requests.length, 1);
+  } finally { await harness.cleanup(); }
+});
+
+test('the remote playback clock respects speed, loop boundaries and stale samples without taking over', async () => {
+  const realNow = Date.now;
+  const testTime = realNow();
+  Date.now = () => testTime;
+  let harness;
+  try {
+    harness = await createHarness();
+    async function display(sample) {
+      harness.emitPlayback(snapshot({ ownerSessionId: 'phone', playbackSessionId: 'phone-session', generation: 2,
+        state: 'playing', speed: 2, looping: false, updatedAt: new Date(Date.now() - 2000).toISOString(), ...sample }));
+      await harness.settle();
+      return harness.api.view.position;
+    }
+    assert.equal(await display({ revision: 2, positionMs: 30000 }), 34);
+    assert.equal(await display({ revision: 3, positionMs: 237000, looping: true }), 1);
+    assert.equal(await display({ revision: 4, positionMs: 237000 }), 240);
+    assert.equal(await display({ revision: 5, positionMs: 19000, state: 'paused' }), 19);
+    assert.equal(await display({ revision: 6, positionMs: 30000, updatedAt: new Date(Date.now() - 12000).toISOString() }), 30);
+    assert.equal(harness.api.stale, true);
+    assert.equal(harness.audio.paused, true);
+    assert.deepEqual(harness.requests, []);
+  } finally { Date.now = realNow; await harness?.cleanup(); }
+});
+
 test('web restore retries the frozen request across unknown outcomes', async t => {
   for (const mode of ['before-commit', 'http-lost', 'sse-before-error', 'sse-after-error']) {
     await t.test(mode, async () => {

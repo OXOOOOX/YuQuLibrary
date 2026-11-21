@@ -5,8 +5,10 @@ import type { Chapter, TranscriptPage, TranscriptSegment, TranscriptSearchPage, 
 import { knowledgeApi, time, type QuestionSelection } from './knowledge-ui';
 import { ChaptersPanel } from './chapters-panel';
 import { SummariesPanel } from './summaries-panel';
+import { TranscriptSentences } from './transcript-sentences';
 
 const labels = { queued: '等待转写', processing: '正在转写', ready: '整期文稿已完成', failed: '转写暂未完成' };
+const readingControls = '.search-form, .chapters-collapsed, .chapters-panel, .summaries-collapsed, .summaries-panel';
 interface FrozenSelection { source: TranscriptSelectionSource; segments: TranscriptSegment[]; page: TranscriptPage; first: number; last: number }
 function highlight(text: string, ranges: { start: number; end: number }[]): ReactNode[] {
   const result: ReactNode[] = []; let previous = 0;
@@ -17,9 +19,10 @@ function highlight(text: string, ranges: { start: number; end: number }[]): Reac
   result.push(text.slice(previous)); return result;
 }
 
-export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable, location, audioAvailable, playbackBusy, active, ask, play, saved }: {
+export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable, location, audioAvailable, playbackBusy, active, playing, ask, play, playFrom, saved }: {
   mediaVersionId: string; positionMs: number; positionAvailable: boolean; location: { positionMs: number; nonce: number } | null;
-  audioAvailable: boolean; playbackBusy: boolean; active: boolean; ask: (selection: QuestionSelection) => void;
+  audioAvailable: boolean; playbackBusy: boolean; active: boolean; playing: boolean; ask: (selection: QuestionSelection) => void;
+  playFrom: (mediaId: string, positionMs: number) => Promise<boolean>;
   play: (mediaId: string, startMs: number, endMs: number) => Promise<void>; saved: () => void;
 }) {
   const [page, setPage] = useState<TranscriptPage | null>(null);
@@ -37,6 +40,8 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
   const [contextHit, setContextHit] = useState<TranscriptSegment | null>(null);
   const [chapterContext, setChapterContext] = useState<Chapter | null>(null);
   const [navigation, setNavigation] = useState(0);
+  const [following, setFollowing] = useState(true);
+  const [locatePaused, setLocatePaused] = useState(false);
   const contextList = useRef<HTMLOListElement | null>(null);
   const resultsList = useRef<HTMLOListElement | null>(null);
   const focusPending = useRef(false);
@@ -48,8 +53,21 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
   const saveRequest = useRef<AbortController | null>(null);
   const saveIds = useRef(new Map<string, string>());
   const loadRef = useRef<(retry?: boolean) => Promise<void>>(async () => {});
+  const followIntent = useRef(0);
 
+  function pauseFollow() { followIntent.current++; setFollowing(false); setLocatePaused(false); }
+  function resumeFollow() {
+    followIntent.current++;
+    setFollowing(true); setLocatePaused(true); setSelection(null); setContextHit(null); setChapterContext(null); setSearch(null);
+  }
+  async function playSentence(ms: number) {
+    if (!audioAvailable || playbackBusy) return;
+    pauseFollow();
+    const intent = followIntent.current;
+    if (await playFrom(mediaVersionId, ms) && followIntent.current === intent) resumeFollow();
+  }
   function jump(ms: number, hit?: TranscriptSegment, top = 0) {
+    pauseFollow();
     searchRequest.current?.abort(); setSearching(false);
     activeRequest.current?.abort(); activeRequest.current = null;
     setContextHit(hit ?? null); focusPending.current = !!hit;
@@ -68,6 +86,7 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
     setChapterContext(null); focusPending.current = false; setSelection(null); setError('');
   }
   function openChapter(chapter: Chapter) {
+    pauseFollow();
     searchRequest.current?.abort(); setSearching(false);
     activeRequest.current?.abort(); activeRequest.current = null;
     setSearch(null); setContextHit(null); searchReturn.current = null; restoreResult.current = false;
@@ -115,21 +134,26 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
   useEffect(() => () => { searchRequest.current?.abort(); saveRequest.current?.abort(); }, []);
 
   function navigate(next: number, history: number[]) {
+    pauseFollow();
     focusPending.current = false;
     setChapterContext(null);
     setSelection(null); setPrevious(history); setAtMs(null); setCursor(next); setPage(null); setError('');
   }
-  function select(index: number) {
-    const shown = selection?.page ?? page;
+  function selectRange(shown: TranscriptPage, first: number, last: number) {
+    pauseFollow();
     if (!shown?.job) return;
-    if (selection && selection.first === index && selection.last === index) { setSelection(null); return; }
-    const first = selection?.first ?? index;
-    const left = Math.min(first, index), right = Math.max(first, index);
+    const left = Math.min(first, last), right = Math.max(first, last);
     if (right - left >= 32) { setError('一次最多选择 32 个连续片段，请缩小范围。'); return; }
     const segments = shown.segments.slice(left, right + 1);
-    setSelection({ page: shown, first, last: index, segments, source: {
+    setSelection({ page: shown, first, last, segments, source: {
       kind: 'transcript-selection', transcriptJobId: shown.job.id, throughMs: shown.job.completedMs, segmentIds: segments.map(segment => segment.id)
     } }); setError(''); setNotice('');
+  }
+  function select(index: number) {
+    const shown = selection?.page ?? page;
+    if (!shown) return;
+    if (selection && selection.first === index && selection.last === index) { setSelection(null); return; }
+    selectRange(shown, selection?.first ?? index, index);
   }
   function askSelection(source: TranscriptSelectionSource, segments: TranscriptSegment[]) {
     ask({ anchor: source, label: `已固定原文 ${time(segments[0].startMs)}–${time(segments.at(-1)!.endMs)}`, nonce: Date.now() });
@@ -149,6 +173,7 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
   }
   async function find(event?: FormEvent, next = false) {
     event?.preventDefault();
+    pauseFollow();
     const term = next && search ? search.query : query.trim();
     if (!term) { searchRequest.current?.abort(); setSearching(false); setSearch(null); return; }
     searchRequest.current?.abort(); const controller = new AbortController(); searchRequest.current = controller;
@@ -164,9 +189,74 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
     finally { if (searchRequest.current === controller) { searchRequest.current = null; setSearching(false); } }
   }
   const shown = selection?.page ?? page, job = page?.job;
-  return <section className="transcript-panel" aria-label="文稿与搜索"><div className="transcript-content">
+  const currentId = positionAvailable && audioAvailable ? shown?.segments.find(segment => segment.startMs <= positionMs && positionMs < segment.endMs)?.id : undefined;
+  const canFollow = active && audioAvailable && positionAvailable && following && (playing || locatePaused) && !selection && !search && !chapterContext && !contextHit;
+  const chunk = Math.floor(positionMs / 30000);
+  // Five 30-second chunks per page. A sentence owned by the previous page can continue into the first chunk.
+  const missingPage = canFollow && !currentId && page && job && positionMs < job.completedMs && (
+    chunk <= page.pageCursor || chunk > page.pageCursor + 5 ||
+    (page.pageCursor >= 0 && chunk === page.pageCursor + 1 && (!page.segments.length || positionMs < page.segments[0].startMs))
+  ) ? chunk : null;
+  const lastPosition = useRef(positionMs);
+  useEffect(() => { lastPosition.current = positionMs; }, [positionMs]);
+  useEffect(() => {
+    if (missingPage === null) return;
+    const controller = new AbortController();
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    async function load() {
+      try {
+        const result = await knowledgeApi<TranscriptPage>(`/api/media/${encodeURIComponent(mediaVersionId)}/transcript?at=${lastPosition.current}`, { signal: controller.signal });
+        if (controller.signal.aborted || result.mediaVersionId !== mediaVersionId) return;
+        activeRequest.current?.abort(); activeRequest.current = null;
+        setAtMs(null); setCursor(result.pageCursor); setPrevious([]); setPage(result); setError('');
+      } catch {
+        if (!controller.signal.aborted) retry = setTimeout(() => { void load(); }, 10000);
+      }
+    }
+    void load();
+    return () => { controller.abort(); clearTimeout(retry); };
+  }, [missingPage, mediaVersionId]);
+  useEffect(() => {
+    if (!canFollow || !currentId) return;
+    const list = contextList.current;
+    const row = list?.querySelector<HTMLElement>('li[aria-current="time"]');
+    if (!list || !row) return;
+    const box = list.getBoundingClientRect();
+    const item = row.getBoundingClientRect();
+    if (item.top < box.top || item.bottom > box.bottom) list.scrollTop += item.top - box.top - Math.max(0, (box.height - item.height) / 3);
+    const rect = row.getBoundingClientRect();
+    const top = Math.max(0, document.querySelector('.persistent-player')?.getBoundingClientRect().bottom ?? 0) + 8;
+    const nav = document.querySelector('.primary-nav');
+    const bottom = (nav && getComputedStyle(nav).position === 'fixed' ? nav.getBoundingClientRect().top : window.innerHeight) - 8;
+    if (rect.top < top || rect.bottom > bottom) window.scrollBy(0, rect.top - top - Math.max(0, (bottom - top - rect.height) / 3));
+    setLocatePaused(false);
+  }, [canFollow, currentId]);
+  useEffect(() => {
+    if (!active || !following) return;
+    const key = (event: KeyboardEvent) => {
+      if (!(event.target instanceof Element) || event.target.closest('input, textarea, select, button')) return;
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) pauseFollow();
+    };
+    const scrollbar = (event: PointerEvent) => {
+      const list = contextList.current;
+      if (event.clientX >= document.documentElement.clientWidth ||
+        (event.target === list && list && event.clientX >= list.getBoundingClientRect().left + list.clientWidth)) pauseFollow();
+    };
+    window.addEventListener('wheel', pauseFollow, { passive: true });
+    window.addEventListener('touchmove', pauseFollow, { passive: true });
+    window.addEventListener('keydown', key); window.addEventListener('pointerdown', scrollbar);
+    return () => {
+      window.removeEventListener('wheel', pauseFollow); window.removeEventListener('touchmove', pauseFollow);
+      window.removeEventListener('keydown', key); window.removeEventListener('pointerdown', scrollbar);
+    };
+  }, [active, following]);
+  return <section className="transcript-panel" aria-label="文稿与搜索"
+    onFocusCapture={event => { if (event.target.closest(readingControls)) pauseFollow(); }}
+    onPointerDownCapture={event => { if ((event.target as Element).closest(`${readingControls}, .sentence-action`)) pauseFollow(); }}>
+    <div className="transcript-content">
     <div className="transcript-heading"><p role="status" data-testid="transcript-status">{page ? job ? labels[job.status] : '验证音频不提供文稿' : '正在读取文稿…'}</p>
-      <button className="text-button" disabled={busy || !positionAvailable} onClick={() => jump(positionMs)}>当前附近</button></div>
+      <button className="text-button" disabled={!audioAvailable || !positionAvailable} aria-pressed={following && audioAvailable && positionAvailable}
+        onClick={() => { if (following) pauseFollow(); else resumeFollow(); }}>{following && audioAvailable && positionAvailable ? '跟读中' : '跟随播放'}</button></div>
     {job ? <p className="muted">文稿已到 {time(job.completedMs)} / {time(job.durationMs)} · {job.status === 'ready' ? '可选择整期提问' : '整期提问等待转写完成'} · 自动转写，内容可能有误</p> : null}
     <form className="search-form" onSubmit={event => { void find(event); }}><label className="field"><span>搜索本集已完成文稿</span><input aria-label="搜索文稿" value={query} maxLength={100} onChange={event => setQuery(event.target.value)} placeholder="输入关键词，如：长期主义" /></label>
       <button type="submit" disabled={searching || !query.trim() || !job?.completedMs}>{searching ? '搜索中…' : '搜索'}</button>{search && !contextHit ? <button type="button" onClick={() => { searchRequest.current?.abort(); setSearching(false); setSearch(null); searchReturn.current = null; }}>返回文稿</button> : null}</form>
@@ -187,12 +277,15 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
           <div className="source-actions"><button className="text-button" onClick={event => jump(segment.startMs, segment, event.currentTarget.closest('li')?.getBoundingClientRect().top ?? 0)}>查看上下文</button><button className="text-button" onClick={() => askSelection(source, [segment])}>问这段</button>
             <button className="text-button" disabled={playbackBusy || !audioAvailable} onClick={() => { void play(mediaVersionId, segment.startMs, segment.endMs); }}>回听</button><button className="text-button" disabled={saving} onClick={() => { void save(source); }}>收藏</button></div></li>;
       })}</ol>}{search.nextCursor ? <button disabled={searching} onClick={() => { void find(undefined, true); }}>更多结果</button> : null}</section> : <>
+      {shown?.segments.length ? <>
+        <p className="muted">{audioAvailable ? '点按句子从这里播放。' : ''}长按并滑动可选多句，键盘可用空格选择、Shift + 方向键扩选。</p>
+        <TranscriptSentences page={shown} list={contextList} currentId={currentId} searchId={contextHit?.id} chapterId={chapterContext?.startSegmentId}
+          selected={selection?.source.segmentIds ?? []} audioAvailable={audioAvailable} playbackBusy={playbackBusy}
+          onRange={selectRange} onSelect={select} onPlay={ms => { void playSentence(ms); }} />
+      </> : page && job ? <p className="muted">这一页暂时没有文稿，可查看前后文或等待转写。</p> : null}
       {selection ? <div className="selection-bar"><span>已固定 {selection.segments.length} 个片段 · {time(selection.segments[0].startMs)}–{time(selection.segments.at(-1)!.endMs)}</span>
         <div className="source-actions"><button onClick={() => askSelection(selection.source, selection.segments)}>问这段</button><button disabled={saving} onClick={() => { void save(selection.source); }}>收藏片段</button><button className="text-button" onClick={() => setSelection(null)}>取消选择</button></div>
-        <small>原文已固定，后续转写不会改变此次选择。</small></div> : shown?.segments.length ? <p className="muted">点选起止片段，可连续选择原文进行提问或收藏。</p> : null}
-      {shown?.segments.length ? <ol ref={contextList} className="transcript-segments" aria-label="当前文稿片段">{shown.segments.map((segment, index) => <li key={segment.id} data-segment-id={segment.id} tabIndex={-1} className={`${selection?.segments.some(item => item.id === segment.id) ? 'selected-segment' : ''} ${contextHit?.id === segment.id || chapterContext?.startSegmentId === segment.id ? 'context-hit' : ''}`}>
-        <label className="segment-selector"><input type="checkbox" aria-label={`选择 ${time(segment.startMs)} 的片段`} checked={selection?.segments.some(item => item.id === segment.id) ?? false} onChange={() => select(index)} /><span className="transcript-time">{time(segment.startMs)}–{time(segment.endMs)}</span></label>
-        <p>{contextHit?.id === segment.id ? <small className="context-hit-label">搜索命中</small> : chapterContext?.startSegmentId === segment.id ? <small className="context-hit-label">章节起点</small> : null}{segment.text}</p></li>)}</ol> : page && job ? <p className="muted">这一页暂时没有文稿，可查看前后文或等待转写。</p> : null}
+        <small>原文已固定，后续转写不会改变此次选择。</small></div> : null}
       {page && job ? <div className="transcript-navigation"><button disabled={busy || (cursor === -1 && !previous.length)} onClick={() => navigate(previous.at(-1) ?? Math.max(-1, cursor - 5), previous.slice(0, -1))}>上一段</button>
         <span className="muted">从 {time(Math.max(0, cursor + 1) * 30000)} 开始{busy ? ' · 更新中' : ''}</span><button disabled={busy || page.nextCursor === null} onClick={() => { if (page.nextCursor !== null) navigate(page.nextCursor, [...previous, cursor]); }}>下一段</button></div> : null}
     </>}

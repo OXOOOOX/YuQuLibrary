@@ -15,6 +15,17 @@ function formatTime(seconds: number) {
   return `${Math.floor(safe / 60).toString().padStart(2, '0')}:${(safe % 60).toString().padStart(2, '0')}`;
 }
 
+function Skip15Icon({ forward = false }: { forward?: boolean }) {
+  return <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+    <g transform={forward ? 'translate(32 0) scale(-1 1)' : undefined}
+      fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4.9 20.6a12 12 0 1 1 3.8 4.9" />
+      <path d="m3.7 16.5 1.2 4.1 2.7-3.2" />
+    </g>
+    <text x="16" y="20.5" textAnchor="middle" fill="currentColor" fontSize="13" fontWeight="650">15</text>
+  </svg>;
+}
+
 type PlaybackSession = ReturnType<typeof usePlaybackSession>;
 function EmailLogin({ session }: { session: PlaybackSession }) {
   const [email, setEmail] = useState('');
@@ -76,19 +87,24 @@ export function PlaybackCheck() {
   const player = useRef<HTMLAudioElement>(null);
   const session = usePlaybackSession(player);
   const { view } = session;
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [reader, setReader] = useState<{ id: string; title: string; sessionId: string; audioAvailable: boolean } | null>(null);
-  const [section, setSection] = useState<'library' | 'listen' | 'saved'>('listen');
-  const [detail, setDetail] = useState<'chat' | 'transcript'>('chat');
+  const [section, setSection] = useState<'library' | 'listen' | 'chat'>('listen');
+  const [libraryView, setLibraryView] = useState<'items' | 'saved'>('items');
   const [selection, setSelection] = useState<{ mediaVersionId: string; sessionId: string; value: QuestionSelection } | null>(null);
   const [location, setLocation] = useState<SourceLocation | null>(null);
   const [savedRevision, setSavedRevision] = useState(0);
-  useEffect(() => { setReader(null); setSelection(null); setLocation(null); setSection('listen'); setDetail('chat'); }, [session.account?.session.id]);
+  useEffect(() => { setReader(null); setSelection(null); setLocation(null); setSection('listen'); setLibraryView('items'); }, [session.account?.session.id]);
   const reading = reader?.sessionId === session.account?.session.id ? reader : null;
   const documentId = reading?.id ?? session.snapshot?.mediaVersionId;
   const sameMedia = documentId === session.snapshot?.mediaVersionId;
   const documentPosition = sameMedia ? Math.round(view.position * 1000) : 0;
   const positionAvailable = sameMedia && !session.stale && !session.busy && !!session.snapshot;
   const documentAudio = reading?.audioAvailable ?? true;
+  const openSection = (next: typeof section) => {
+    setSection(next);
+    window.scrollTo(0, 0);
+  };
   const pinDocument = () => {
     if (!documentId || !session.account) return;
     setReader(previous => previous?.id === documentId && previous.sessionId === session.account!.session.id ? previous : {
@@ -98,18 +114,18 @@ export function PlaybackCheck() {
   const locate = (source: SourceLocation) => {
     if (!session.account) return;
     setReader({ id: source.mediaVersionId, title: source.title || reading?.title || session.snapshot?.title || '文稿', sessionId: session.account.session.id, audioAvailable: source.audioAvailable ?? documentAudio });
-    setLocation(source); setSection('listen'); setDetail('transcript');
+    setLocation(source); openSection('listen');
   };
   const primaryLabel = session.account ? session.own && view.playing ? '暂停' : '在此设备播放' : view.playing ? '暂停' : '播放';
 
-  return <main>
+  return <main className={session.account ? 'with-primary-nav' : undefined}>
     <header><span className="brand">鱼趣知识库</span>
       {session.account ? <div className="account-identity"><span title={session.account.user.email}>{session.account.user.email}</span>
         <button className="text-button" onClick={() => { void session.logout(); }} disabled={session.busy}>退出</button></div> : <span className="muted">{session.loading ? '正在恢复登录…' : '本地试听'}</span>}
     </header>
     {!session.account && !session.loading ? <EmailLogin session={session} /> : null}
-    {session.account ? <nav className="section-tabs" aria-label="主导航">{([['library', '资料库'], ['listen', '收听'], ['saved', '收藏']] as const).map(([id, title]) =>
-      <button key={id} aria-current={section === id ? 'page' : undefined} onClick={() => setSection(id)}>{title}</button>)}</nav> : null}
+    {session.account ? <nav className="section-tabs primary-nav" aria-label="主导航">{([['library', '资料库'], ['listen', '收听'], ['chat', '对话']] as const).map(([id, title]) =>
+      <button key={id} aria-current={section === id ? 'page' : undefined} onClick={() => openSection(id)}>{title}</button>)}</nav> : null}
     <section className="player persistent-player" aria-label="播放器">
       <h1>{session.snapshot?.title || PLAYBACK_FIXTURE.title}</h1>
       <audio ref={player} src="/audio/playback-check.wav" preload="metadata" loop
@@ -123,13 +139,21 @@ export function PlaybackCheck() {
         disabled={!session.canControl || session.busy} aria-label="播放进度" onChange={event => session.seek(Number(event.target.value))} />
       <div className="time"><span data-testid="playback-time">{formatTime(view.position)} / {formatTime(view.duration)}</span>
         <span>{view.playing ? '正在播放' : '已暂停'} · {session.following ? '静音跟随' : '本机'}</span></div>
-      <div className="controls">
+      <div className="controls" role="group" aria-label="播放控制">
+        <button onClick={() => session.seek(view.position - 15)} disabled={!session.canControl || session.busy}
+          aria-label="后退十五秒" title="后退 15 秒"><Skip15Icon /></button>
         <button className="primary" onClick={() => { void session.playHere(); }} disabled={session.loading || session.busy || (!!session.account && !session.snapshot)}>{primaryLabel}</button>
-        <button onClick={() => session.seek(view.position - 15)} disabled={!session.canControl || session.busy} aria-label="后退十五秒">−15 秒</button>
-        <button onClick={() => session.seek(view.position + 15)} disabled={!session.canControl || session.busy} aria-label="前进十五秒">+15 秒</button>
-        <select aria-label="播放速度" value={view.speed} disabled={!session.canControl || session.busy} onChange={event => session.setSpeed(Number(event.target.value))}>
+        <button onClick={() => session.seek(view.position + 15)} disabled={!session.canControl || session.busy}
+          aria-label="前进十五秒" title="前进 15 秒"><Skip15Icon forward /></button>
+        <button onClick={() => setSettingsOpen(open => !open)} aria-expanded={settingsOpen} aria-controls="playback-settings"
+          aria-label={`播放设置，${view.speed} 倍速，循环${view.looping ? '开启' : '关闭'}`}>
+          {view.speed}× {view.looping ? '循环' : '设置'}
+        </button>
+      </div>
+      <div className="playback-settings" id="playback-settings" hidden={!settingsOpen}>
+        <label>倍速 <select aria-label="播放速度" value={view.speed} disabled={!session.canControl || session.busy} onChange={event => session.setSpeed(Number(event.target.value))}>
           {[1, 1.25, 1.5, 2].map(rate => <option key={rate} value={rate}>{rate}×</option>)}
-        </select>
+        </select></label>
         <label className="loop"><input type="checkbox" checked={view.looping} disabled={!session.canControl || session.busy}
           onChange={event => session.setLooping(event.target.checked)} />循环</label>
       </div>
@@ -142,27 +166,34 @@ export function PlaybackCheck() {
         <div className="source-actions"><button disabled={session.busy} onClick={() => { void session.restorePlayback(); }}>在本机返回原位置</button>
           <button disabled={session.busy || !session.own} onClick={() => { void session.continuePlayback(); }}>继续听</button><button className="text-button" onClick={session.clearReturnPoint}>关闭</button></div></div> : null}
     </section>
-    {session.account ? <div hidden={section !== 'library'}><LibraryPanel key={session.account.session.id} visible={section === 'library'} currentMediaId={session.snapshot?.mediaVersionId}
-      playbackBusy={session.busy || !session.snapshot} play={async id => { await session.playHere(id); setReader(null); setSection('listen'); }}
-      read={item => { setReader({ id: item.mediaVersionId, title: item.title, sessionId: session.account!.session.id, audioAvailable: item.audioAvailable }); setSection('listen'); setDetail('transcript'); setLocation(null); }}
+    {session.account ? <div hidden={section !== 'library'} className="library-detail">
+      <nav className="section-tabs" aria-label="资料库分类">
+        <button aria-pressed={libraryView === 'items'} onClick={() => setLibraryView('items')}>节目</button>
+        <button aria-pressed={libraryView === 'saved'} onClick={() => setLibraryView('saved')}>收藏</button>
+      </nav>
+      <div hidden={libraryView !== 'items'}><LibraryPanel key={session.account.session.id} visible={section === 'library' && libraryView === 'items'} currentMediaId={session.snapshot?.mediaVersionId}
+      playbackBusy={session.busy || !session.snapshot} play={async id => { await session.playHere(id); setReader(null); openSection('listen'); }}
+      read={item => { setReader({ id: item.mediaVersionId, title: item.title, sessionId: session.account!.session.id, audioAvailable: item.audioAvailable }); openSection('listen'); setLocation(null); }}
       removed={async (id, mode) => {
         session.clearReturnPoint(); setSavedRevision(value => value + 1);
         setReader(previous => previous?.id !== id ? previous : mode === 'all' ? null : { ...previous, audioAvailable: false });
         await session.refreshPlayback();
-      }} /></div> : null}
-    {session.account && documentId ? <div hidden={section !== 'listen'} className="listening-detail">
+      }} /></div>
+      <div hidden={libraryView !== 'saved'}><SavedPanel key={session.account.session.id} enabled={section === 'library' && libraryView === 'saved'} currentMediaId={documentId} refreshToken={savedRevision}
+        playbackBusy={session.busy || !session.snapshot} play={session.replayCitation} locate={locate} /></div>
+    </div> : null}
+    {session.account && documentId ? <div hidden={section === 'library'} className="listening-detail">
       <section className="reading-heading" aria-label="正在查看文稿"><div><strong>{reading?.title || session.snapshot?.title || '当前节目'}</strong>
         <p className="muted">{sameMedia ? '文稿、搜索和对话不会中断播放。' : '独立阅读，不改变当前播放。可选择文稿片段或检索整期文稿提问。'}</p></div>
         {!sameMedia ? <button onClick={() => { setReader(null); setSelection(null); setLocation(null); }}>返回当前节目</button> : null}</section>
-      <div className="section-tabs" aria-label="收听详情"><button aria-pressed={detail === 'chat'} onClick={() => setDetail('chat')}>对话</button><button aria-pressed={detail === 'transcript'} onClick={() => setDetail('transcript')}>文稿与搜索</button></div>
-      <div hidden={detail !== 'transcript'}><TranscriptPanel key={`transcript:${session.account.session.id}:${documentId}`}
+      <div hidden={section !== 'listen'}><TranscriptPanel key={`transcript:${session.account.session.id}:${documentId}`}
         mediaVersionId={documentId} positionMs={documentPosition} positionAvailable={positionAvailable}
         location={location?.mediaVersionId === documentId ? location : null} audioAvailable={documentAudio} playbackBusy={session.busy || !session.snapshot}
-        active={section === 'listen' && detail === 'transcript'}
+        active={section === 'listen'} playing={view.playing} playFrom={session.playHere}
         play={session.replayCitation} saved={() => setSavedRevision(value => value + 1)} ask={value => {
-          setSelection({ mediaVersionId: documentId, sessionId: session.account!.session.id, value }); pinDocument(); setDetail('chat');
+          setSelection({ mediaVersionId: documentId, sessionId: session.account!.session.id, value }); pinDocument(); openSection('chat');
         }} /></div>
-      <div hidden={detail !== 'chat'}><ChatPanel key={`chat:${session.account.session.id}:${documentId}`}
+      <div hidden={section !== 'chat'}><ChatPanel key={`chat:${session.account.session.id}:${documentId}`}
         mediaVersionId={documentId} positionMs={documentPosition} positionAvailable={positionAvailable} positionSource={session.own ? 'local' : 'synced'}
         selection={selection?.mediaVersionId === documentId && selection.sessionId === session.account.session.id ? selection.value : null}
         playCitation={session.replayCitation} playbackBusy={session.busy || !session.snapshot} playbackError={session.error}
@@ -173,9 +204,8 @@ export function PlaybackCheck() {
             value: { anchor: { kind: 'position', positionMs: Math.round(view.position * 1000), scope, capturedAt: new Date().toISOString(), positionSource: session.own ? 'local' : 'synced' }, label: '', nonce: Date.now(), question: draft } });
         }} onUnavailable={() => { setReader(null); void session.refreshPlayback(); }} /></div>
     </div> :
-      <section className="empty" aria-label="对话区"><div><strong>边听，边理清思路</strong><p>登录并选择节目，即可根据文稿提问，手机与网页继续同一段对话。</p></div></section>}
-    {session.account ? <div hidden={section !== 'saved'}><SavedPanel key={session.account.session.id} enabled={section === 'saved'} currentMediaId={documentId} refreshToken={savedRevision}
-      playbackBusy={session.busy || !session.snapshot} play={session.replayCitation} locate={locate} /></div> : null}
+      <section hidden={section === 'library'} className="empty" aria-label={section === 'chat' ? '对话区' : '收听区'}><div><strong>边听，边理清思路</strong>
+        <p>{session.account ? '从资料库选择节目，即可查看文稿和对话。' : '登录并选择节目，即可根据文稿提问，手机与网页继续同一段对话。'}</p></div></section>}
     {process.env.NODE_ENV !== 'production' ? <ConnectionProbe /> : null}
     <footer className="privacy-footer"><a href="/privacy" target="_blank" rel="noopener noreferrer">隐私说明与数据管理</a></footer>
   </main>;

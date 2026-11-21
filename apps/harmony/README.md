@@ -4,6 +4,7 @@
 
 ## 当前验证状态
 
+- 2026-11-20 已生成 `0.1.1`（`1000001`）的 Release APP 和调试 HAP。手机模拟器从 `0.1.0` 覆盖升级后能打开收听页，播放设置中的“播放时缓存本期音频”可正常切换。缓存就绪后可在本次收听时离线使用；文稿页在服务端提供字幕来源时显示相应标签。完整视频的自适应下载由转写机执行。
 - 已提供工程配置、入口、页面、应用级播放器服务和资源。
 - **已通过真实 ArkTS/Hvigor 编译和 HarmonyOS 7 模拟器运行**，生成并安装未签名 debug HAP；已验证基本控制、十分钟后台循环、20 秒灭屏播放和锁屏媒体卡片暂停/继续。真机后台播放仍待验收，详见[验证记录](../../docs/verification/harmony-build-emulator.md)。
 - 用户设备报告为 HarmonyOS 7，当前不能通过 USB 连接，先进行桌面模拟器验证。工程兼容下限现设为 API 26.0.0，与已测试的 HarmonyOS 7 对齐；网络请求禁止重定向使用新 SDK 能力，旧系统兼容性另行验证后再降低下限。
@@ -11,12 +12,12 @@
 ## 工具链与打开方式
 
 1. 新环境优先安装华为官方 DevEco Studio **26.0.0 Release**，截至 2026-11-16 正式版补丁为 **26.0.0.865**，使用集成的 HarmonyOS **26.0.0 Release SDK**。原始 26.0.0.821 发布说明列出的配套工具为 Hvigor **6.26.4**、ohpm **26.0.0.630** 和 Node.js **24.14.1**；安装后记录实际补丁及工具版本。本机已安装版本见下一项，无需为本次验证重装。用 DevEco 打开本目录，模拟器镜像另行下载。
-2. 当前本机实际安装的是 **26.0.1.290 / SDK 26.0.1.120 Beta1 / Hvigor 6.26.20**，已用于本次编译。本工程 `modelVersion`、`targetSdkVersion`、`compatibleSdkVersion` 均为 `"26.0.0"`，使用 DevEco 配套 Hvigor 插件；不写死 `compileSdkVersion`，由当前 IDE 内置 SDK 决定。当前最低版本限定为已测试的 API 26，不声称支持早期系统，发布前须用确定的正式工具链复核。
+2. `0.1.1` 的调试包和发布包使用 DevEco Command Line Tools、SDK **26.0.0.105 Release** 和 Hvigor **6.26.9** 实际构建。最低及目标版本均为 API 26。在仓库根目录运行 `npm run harmony:doctor` 可核对当前工具链。
 3. 在仓库根目录执行 `npm run fixtures:generate`，生成 `entry/src/main/resources/rawfile/playback-check.wav`。它是 120 秒受控 WAV，未就绪时播放器会显示错误而不会伪造播放状态。
 4. 同步工程依赖，选择 `entry/default` 和可用的手机模拟器，执行构建后运行。仓库根目录也可执行 `npm run harmony:build`，无需全局 `hvigorw`；`npm run harmony:build -- --clean` 会清理模块产物并重新编译。产物为 `entry/build/default/outputs/default/entry-default-unsigned.hap`。
 5. `signingConfigs` 保持空。模拟器签名要求按实际设备类型和 DevEco 提示处理；真机调试时在本机配置调试签名，勿提交证书、Profile、私钥或包含密码的签名配置。
 
-包名暂用 `com.yuqu.library`，正式创建应用、配置签名和发布前需确认归属及唯一性。
+包名为 `com.yuqu.library`。运行 `npm run harmony:build -- --app` 生成 `build/outputs/default/harmony-default-unsigned.app`。邀请测试使用 DevEco 的 **Upload Product → Testing Only** 云签名，再在 AppGallery 选择新包。[测试分发记录](../../docs/harmony-apptest-preparation.md)
 
 ## 播放与生命周期
 

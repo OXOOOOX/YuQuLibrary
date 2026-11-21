@@ -239,8 +239,30 @@ struct Index {
   }
 
   private canControl(): boolean {
-    return this.viewState.ready && !this.viewState.busy && !this.account.busy &&
+    return this.viewState.ready && !this.viewState.recovering && !this.viewState.busy && !this.account.busy &&
       !this.account.restoring && (!this.account.loggedIn || (this.account.owner && this.account.audioAvailable));
+  }
+
+  private canRetryPlayback(): boolean {
+    return this.viewState.playerState === 'error' && this.account.owner && this.account.audioAvailable &&
+      !this.account.busy && !this.account.restoring && !this.viewState.busy &&
+      this.viewState.mediaVersionId === this.account.mediaVersionId;
+  }
+
+  private playbackActionLabel(): string {
+    if (this.viewState.recovering) return '取消重连';
+    if (this.canRetryPlayback()) return '重试播放';
+    return this.viewState.playerState === 'playing' ? '暂停' : '播放';
+  }
+
+  private togglePlayback(): void {
+    if (this.viewState.recovering) void PlaybackService.getInstance().pause();
+    else if (this.canRetryPlayback()) {
+      const position = Math.round(this.viewState.positionMs);
+      void AccountSync.getInstance().takeover(this.viewState.mediaVersionId,
+        position >= 0 && position < this.account.durationMs ? position : undefined);
+    }
+    else if (this.canControl()) void AccountSync.getInstance().playOrPause();
   }
 
   private formatBytes(value: number): string {
@@ -632,12 +654,10 @@ struct Index {
         Button('后退 15 秒').quietAction().layoutWeight(1)
           .id('playback-back').enabled(this.canControl())
           .onClick(() => { void AccountSync.getInstance().seek(this.viewState.positionMs - 15000); })
-        Button(this.viewState.playerState === 'playing' ? '暂停' : '播放').quietAction().layoutWeight(1)
+        Button(this.playbackActionLabel()).quietAction().layoutWeight(1)
           .backgroundColor($r('app.color.yuqu_primary')).fontColor($r('app.color.yuqu_on_primary'))
-          .id('playback-toggle').enabled(this.canControl())
-          .onClick(() => {
-            void AccountSync.getInstance().playOrPause();
-          })
+          .id('playback-toggle').enabled(this.viewState.recovering || this.canControl() || this.canRetryPlayback())
+          .onClick(() => { this.togglePlayback(); })
         Button('前进 15 秒').quietAction().layoutWeight(1)
           .id('playback-forward').enabled(this.canControl())
           .onClick(() => { void AccountSync.getInstance().seek(this.viewState.positionMs + 15000); })
@@ -645,6 +665,10 @@ struct Index {
       if (this.account.loggedIn && !this.account.owner) {
         Button('在此设备播放').quietAction().id('listen-takeover').enabled(!this.account.busy && this.account.audioAvailable && this.account.mediaVersionId.length > 0)
           .onClick(() => { void AccountSync.getInstance().takeover(); })
+      }
+      if (this.account.loggedIn && this.viewState.diagnosticIncidentId.length > 0 &&
+        this.account.mediaVersionId === this.viewState.mediaVersionId) {
+        this.diagnosticPrompt('playback')
       }
       Button(`${this.account.speed}× · ${this.account.looping ? '循环播放' : '播放设置'}`).quietAction().id('player-settings')
         .onClick(() => { this.showPlayerOptions = !this.showPlayerOptions; })
@@ -664,7 +688,22 @@ struct Index {
             .enabled(this.canControl())
             .onChange((enabled: boolean) => { void AccountSync.getInstance().setLooping(enabled); })
         }.width('100%')
-        Text('中断或耳机断开后会暂停，请手动继续播放。').fontSize(13).fontColor($r('app.color.yuqu_muted'))
+        Row() {
+          Text('播放时缓存本期音频').fontSize(14).layoutWeight(1)
+          Toggle({ type: ToggleType.Switch, isOn: this.viewState.cacheEnabled })
+            .id('playback-cache-toggle').accessibilityText('播放时缓存本期音频')
+            .selectedColor($r('app.color.yuqu_accent_ink'))
+            .onChange((enabled: boolean) => { PlaybackService.getInstance().setPlaybackCacheEnabled(enabled); })
+        }.width('100%')
+        Text('缓存会使用网络流量。关闭后停止下载，已缓存的本期仍可继续听。')
+          .fontSize(13).fontColor($r('app.color.yuqu_muted'))
+        Text('网络中断后会尝试从原位置续播。来电或耳机断开后请手动继续播放。').fontSize(13).fontColor($r('app.color.yuqu_muted'))
+      }
+      if (this.viewState.cacheStatus === 'ready' || (this.viewState.cacheEnabled && this.viewState.cacheStatus !== 'idle')) {
+        Text(this.viewState.cacheStatus === 'ready' ? '本期已缓存，可断网继续听' :
+          this.viewState.cacheStatus === 'failed' ? '本期缓存失败，继续收听需要联网' :
+          `正在缓存本期 ${this.viewState.cachePercent}% · 请保持联网`)
+          .id('playback-cache-status').fontSize(13).fontColor($r('app.color.yuqu_muted'))
       }
     }.padding(16).width('100%').alignItems(HorizontalAlign.Start).backgroundColor($r('app.color.yuqu_surface')).borderRadius(16)
   }
@@ -691,6 +730,41 @@ struct Index {
   }
 
   @Builder
+  private diagnosticPrompt(kind: string) {
+    if (this.account.diagnosticKind !== kind) {
+      Text(kind === 'playback' ? '本期播放遇到过问题，愿意上传日志帮助排查吗？' : '转写失败，愿意上传日志帮助排查吗？').fontSize(14)
+      Button('查看待上传日志').quietAction().id(`diagnostic-open-${kind}`)
+        .enabled(this.account.diagnosticPhase !== 'sending').onClick(() => { AccountSync.getInstance().previewDiagnostic(kind); })
+    } else if (this.account.diagnosticPhase === 'sent') {
+      Text(`日志已上传，受理编号 ${this.account.diagnosticId}`).fontSize(14).copyOption(CopyOptions.LocalDevice).id(`diagnostic-receipt-${kind}`)
+    } else {
+      ForEach([this.account.diagnosticId], (reportId: string) => {
+        this.diagnosticReview(kind, reportId)
+      }, (reportId: string) => reportId)
+    }
+  }
+
+  @Builder
+  private diagnosticReview(kind: string, reportId: string) {
+    Column({ space: 10 }) {
+      Text('上传故障日志').fontSize(16).fontWeight(FontWeight.Medium)
+      Text(`确认后会把以下内容发送至 ${this.account.baseUrl}，供维护人员排查这次故障。报告与当前账号关联，在线保留 14 天。`).fontSize(13)
+      Text(this.account.diagnosticPreview).fontSize(13).copyOption(CopyOptions.LocalDevice).id(`diagnostic-preview-${kind}`)
+      if (this.account.diagnosticError.length > 0) {
+        Text(this.account.diagnosticError).fontSize(13).fontColor($r('app.color.yuqu_danger'))
+      }
+      Row({ space: 8 }) {
+        Button('取消').quietAction().enabled(this.account.diagnosticPhase !== 'sending').id(`diagnostic-cancel-${kind}`)
+          .onClick(() => { AccountSync.getInstance().cancelDiagnostic(reportId); })
+        Button(this.account.diagnosticPhase === 'sending' ? '正在上传…' :
+          this.account.diagnosticPhase === 'failed' ? '重试上传' : '确认上传').quietAction()
+          .enabled(this.account.diagnosticPhase !== 'sending').id(`diagnostic-send-${kind}`)
+          .onClick(() => { void AccountSync.getInstance().submitDiagnostic(reportId); })
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
   private transcriptPanel() {
     Column({ space: 12 }) {
       Row({ space: 8 }) {
@@ -701,13 +775,16 @@ struct Index {
       if (this.account.transcriptJob !== null) {
         Text(`已处理至 ${this.formatTime(this.account.transcriptJob.completedMs)} / ${this.formatTime(this.account.transcriptJob.durationMs)}`)
           .id('transcript-progress').fontSize(13).fontColor($r('app.color.yuqu_muted'))
-        Text('自动转写，内容可能有误').fontSize(12).fontColor($r('app.color.yuqu_muted'))
+        Text(this.account.transcriptJob.sourceLabel ?? '自动转写，内容可能有误').fontSize(12).fontColor($r('app.color.yuqu_muted'))
         if (this.account.transcriptJob.error !== null) {
           Text(this.account.transcriptJob.error).fontSize(13).fontColor($r('app.color.yuqu_danger'))
         }
         if (this.account.transcriptJob.status === 'failed' && !this.account.readingArchived) {
           Button('重试转写').quietAction().id('transcript-retry').enabled(!this.account.transcriptBusy)
             .onClick(() => { void AccountSync.getInstance().refreshTranscript(true); })
+        }
+        if (this.account.transcriptDiagnosticAvailable) {
+          this.diagnosticPrompt('transcription')
         }
       }
       if (this.account.transcriptError.length > 0) {
@@ -987,8 +1064,9 @@ struct Index {
           Button('本机播放').quietAction().id('mini-takeover').fontSize(12).enabled(!this.account.busy && this.account.audioAvailable)
             .onClick(() => { void AccountSync.getInstance().takeover(); })
         } else {
-          Button(this.viewState.playerState === 'playing' ? '暂停' : '播放').quietAction().id('mini-play-toggle').fontSize(12).enabled(this.canControl())
-            .onClick(() => { void AccountSync.getInstance().playOrPause(); })
+          Button(this.playbackActionLabel()).quietAction().id('mini-play-toggle').fontSize(12)
+            .enabled(this.viewState.recovering || this.canControl() || this.canRetryPlayback())
+            .onClick(() => { this.togglePlayback(); })
         }
       }.width('100%')
     }.padding({ left: 16, right: 16, top: 4, bottom: 4 }).width('100%').backgroundColor($r('app.color.yuqu_surface'))

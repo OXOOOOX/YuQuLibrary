@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 const dir=new URL('../apps/harmony/entry/src/main/ets/services/',import.meta.url);
 const source=fs.readFileSync(new URL('AccountSync.ets', dir),'utf8').replace(/^import .*;$/gm,'');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
+const diagnosticSource = fs.readFileSync(new URL('DiagnosticReport.ets', dir), 'utf8').replace(/^import .*;$/gm, '');
+const diagnosticModule = { exports: {}, util: { generateRandomUUID: randomUUID } };
+vm.runInNewContext(ts.transpileModule(diagnosticSource, { compilerOptions: {
+  target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS
+} }).outputText, diagnosticModule);
+const diagnosticApi = diagnosticModule.exports;
 const deferred=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j;});return {promise,resolve,reject};};
 const settle=async()=>{for(let i=0;i<30;i++)await Promise.resolve();};
 const clone=v=>JSON.parse(JSON.stringify(v));
@@ -15,6 +22,7 @@ function create(){
  const profile={user:{id:'u1',email:'a@example.com'},session:{id:'s1',deviceName:'鸿蒙手机',client:'harmony',expiresAt:new Date(now+86400000).toISOString()}};
  const player={state:{mediaVersionId:'fixture-pcm-v1',contentId:'yuqu-playback-check-v1',title:'样本',buffering:false,ready:true,busy:false,playerState:'paused',positionMs:0,durationMs:120000,rate:1,looping:false,backgroundActive:false,backgroundStatus:'未申请',foreground:true,error:'',events:[]},listeners:[],
  getSnapshot(){return {...this.state,events:[...this.state.events]};},subscribe(f){this.listeners.push(f);f(this.getSnapshot());return()=>this.listeners.splice(this.listeners.indexOf(f),1);},emit(){for(const f of this.listeners)f(this.getSnapshot());},
+ clearDiagnosticReports(){this.state.diagnosticIncidentId='';},
  setPlaybackPermission(f){this.permission=f;},cancelMediaLoading(){calls.push('cancel-load');},
  async loadMedia(contentId,mediaVersionId,title,base='',token=''){calls.push(['load',mediaVersionId,base]);Object.assign(this.state,{contentId,mediaVersionId,title,ready:true,positionMs:0,durationMs:mediaVersionId==='fixture-pcm-v1'?120000:240000,playerState:'prepared'});this.emit();},
  async loadFixture(){await this.loadMedia('yuqu-playback-check-v1','fixture-pcm-v1','样本');},
@@ -37,7 +45,7 @@ function create(){
  class FakeStream{constructor(event,state){this.event=event;this.state=state;this.foreground=true;streams.push(this);}start(url,token){this.url=url;this.token=token;this.state({status:'connected'});}stop(){this.token='';this.state({status:'stopped'});}setForeground(v){this.foreground=v;}reconnect(){}}
  class FakeRequest{destroyed=false;destroy(){this.destroyed=true;}async request(url,options){const path=new URL(url).pathname;const body=options.extraData?JSON.parse(options.extraData):undefined;const req={path,body,options};requests.push(req);if(path==='/api/playback/report'){reportCount++;maxReports=Math.max(maxReports,reportCount);}try{const v=await handler(path,body,options);if(v?.__status)return {responseCode:v.__status,result:JSON.stringify(v.reply)};return {responseCode:200,result:JSON.stringify(v)};}finally{if(path==='/api/playback/report')reportCount--;}}}
  class Clock extends Date{constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
- const context={exports:{},Date:Clock,JSON,Number,Math,Error,Promise,Record:undefined,
+ const context={...diagnosticApi,exports:{},Date:Clock,JSON,Number,Math,Error,Promise,Record:undefined,
  http:{RequestMethod:{GET:'GET',POST:'POST'},HttpDataType:{STRING:0},createHttp:()=>new FakeRequest()},
  util:{generateRandomUUID:()=>`req-${requests.length}`},PlaybackService:{getInstance:()=>player},SessionVault:FakeVault,EventStream:FakeStream,
  setInterval:()=>1,clearInterval:()=>{},setTimeout,clearTimeout};vm.runInNewContext(compiled,context);
@@ -87,6 +95,160 @@ const checks=[];
  await e.account.refresh();await settle();await e.account.takeover();await settle();assert.equal(e.account.getSnapshot().error,'播放设备已发生变化，请重新确认接管');
  await e.account.refresh();await settle();assert.equal(e.account.getSnapshot().error,'播放设备已发生变化，请重新确认接管');
  checks.push('explicit takeover failure remains after background sync recovers');e.account.release();
+}
+function simulatePlaybackIncident(e) {
+  const recorder = new diagnosticApi.PlaybackDiagnostics();
+  recorder.reset(e.player.state.mediaVersionId);
+  recorder.fail(374000, true, 5400103);
+  recorder.record('resumed', 374000);
+  e.player.getDiagnosticReport = () => recorder.snapshot();
+  e.player.state.diagnosticIncidentId = recorder.incidentId;
+  e.player.emit();
+}
+
+const uploads = e => e.requests.filter(request => request.path === '/api/diagnostics');
+{
+  const e = create();
+  await signIn(e);
+  const loadMedia = e.player.loadMedia.bind(e.player);
+  let fixtureSource;
+  e.player.loadMedia = async (contentId, mediaVersionId, title, base, token) => {
+    fixtureSource = { mediaVersionId, base, token };
+    return loadMedia(contentId, mediaVersionId, title, base, token);
+  };
+  await e.account.takeover();
+  assert.deepEqual(fixtureSource, { mediaVersionId: 'fixture-pcm-v1', base: '', token: 'secret-token' });
+  simulatePlaybackIncident(e);
+  e.account.previewDiagnostic('playback');
+  const preview = e.account.getSnapshot();
+  assert.match(preview.diagnosticPreview, /5400103/);
+  assert.match(preview.diagnosticPreview, /已续播/);
+  e.account.cancelDiagnostic(preview.diagnosticId);
+  await e.account.submitDiagnostic(preview.diagnosticId);
+  assert.equal(uploads(e).length, 0);
+
+  e.account.previewDiagnostic('playback');
+  assert.equal(e.account.getSnapshot().diagnosticId, preview.diagnosticId);
+  const pending = deferred();
+  e.setHandler((path, body, opts) => path === '/api/diagnostics' ? pending.promise : e.initialHandler(path, body, opts));
+  const first = e.account.submitDiagnostic(preview.diagnosticId);
+  await e.account.submitDiagnostic(preview.diagnosticId);
+  e.account.cancelDiagnostic(preview.diagnosticId);
+  assert.equal(uploads(e).length, 1);
+  assert.equal(e.account.getSnapshot().diagnosticPhase, 'sending');
+  assert.equal(uploads(e)[0].options.method, 'POST');
+  assert.equal(uploads(e)[0].options.header.Authorization, 'Bearer secret-token');
+  assert.equal(diagnosticApi.diagnosticPreview(uploads(e)[0].body), preview.diagnosticPreview);
+  pending.reject(new Error('network unavailable'));
+  await first;
+  assert.equal(e.account.getSnapshot().diagnosticPhase, 'failed');
+  e.setHandler((path, body, opts) => path === '/api/diagnostics' ? { reportId: 'wrong receipt' } : e.initialHandler(path, body, opts));
+  await e.account.submitDiagnostic(preview.diagnosticId);
+  assert.equal(e.account.getSnapshot().diagnosticPhase, 'failed');
+  e.setHandler((path, body, opts) => path === '/api/diagnostics' ? { reportId: body.reportId } : e.initialHandler(path, body, opts));
+  await e.account.submitDiagnostic(preview.diagnosticId);
+  const receipt = e.account.getSnapshot();
+  assert.equal(receipt.diagnosticPhase, 'sent');
+  assert.equal(receipt.diagnosticId, preview.diagnosticId);
+  await e.account.submitDiagnostic(preview.diagnosticId);
+  assert.equal(uploads(e).length, 3);
+  assert.ok(uploads(e).every(request => request.options.extraData === uploads(e)[0].options.extraData));
+  checks.push('recovered playback can be reported; preview/cancel stay local, confirmed retry uses exact same payload and matched receipt');
+  e.account.release();
+}
+{
+  const e = create();
+  await signIn(e);
+  simulatePlaybackIncident(e);
+  e.account.previewDiagnostic('playback');
+  const obsolete = e.account.getSnapshot().diagnosticId;
+  const next = { ...e.getSnapshot(), revision: 80, mediaVersionId: 'next-media' };
+  e.streams[0].event({ event: 'playback', data: JSON.stringify(next), id: '80' });
+  await e.account.submitDiagnostic(obsolete);
+  assert.equal(uploads(e).length, 0);
+  assert.equal(e.account.getSnapshot().diagnosticId, '');
+  e.streams[0].event({ event: 'playback', data: JSON.stringify({ ...e.getSnapshot(), revision: 81 }), id: '81' });
+  e.account.previewDiagnostic('playback');
+  const pending = deferred();
+  e.setHandler((path, body, opts) => path === '/api/diagnostics' ? pending.promise : e.initialHandler(path, body, opts));
+  const sending = e.account.submitDiagnostic(obsolete);
+  await e.account.logout();
+  await signIn(e);
+  pending.resolve({ reportId: obsolete });
+  await sending;
+  e.account.previewDiagnostic('playback');
+  assert.equal(e.account.getSnapshot().diagnosticId, '');
+  assert.equal(e.account.getSnapshot().diagnosticPreview, '');
+  assert.equal(uploads(e).length, 1);
+  checks.push('media changes invalidate consent and old session uploads cannot display in a new session');
+  e.account.release();
+}
+{
+  const e = create();
+  await signIn(e);
+  simulatePlaybackIncident(e);
+  const mediaId = 'reading-media-id';
+  const otherId = 'other-reading-id';
+  const job = { id: '044027a2-d274-46a2-80fc-6661cf85cabe', status: 'failed', attempts: 2,
+    durationMs: 240000, completedMs: 73000, updatedAt: '2026-11-01T00:00:00Z', model: null, error: 'sample private failure' };
+  let upload;
+  e.setHandler((path, body, opts) => {
+    if (path === '/api/library') return { items: [mediaId, otherId].map(mediaVersionId =>
+      ({ mediaVersionId, durationMs: 240000, audioAvailable: false })) };
+    for (const mediaVersionId of [mediaId, otherId]) {
+      if (path === `/api/media/${mediaVersionId}/transcript`) return { mediaVersionId, job, segments: [], pageCursor: -1, nextCursor: null };
+    }
+    if (path === '/api/diagnostics') return upload.promise;
+    return e.initialHandler(path, body, opts);
+  });
+  e.account.setLibraryOpen(true);
+  await settle();
+  e.account.selectReading(mediaId);
+  await settle();
+  assert.equal(e.account.getSnapshot().transcriptDiagnosticAvailable, true);
+  e.account.previewDiagnostic('transcription');
+  const first = e.account.getSnapshot();
+  assert.ok(first.diagnosticPreview.includes(mediaId) && first.diagnosticPreview.includes(job.id));
+  assert.doesNotMatch(first.diagnosticPreview, /5400103|fixture-pcm-v1|sample private failure/);
+  job.updatedAt = '2026-11-02T00:00:00Z';
+  await e.account.refreshTranscript();
+  assert.equal(e.account.getSnapshot().diagnosticId, '');
+  e.account.previewDiagnostic('transcription');
+  const latest = e.account.getSnapshot();
+  assert.notEqual(latest.diagnosticId, first.diagnosticId);
+  await e.account.submitDiagnostic(first.diagnosticId);
+  assert.equal(uploads(e).length, 0);
+  upload = deferred();
+  const sending = e.account.submitDiagnostic(latest.diagnosticId);
+  const body = uploads(e)[0].body;
+  assert.equal(body.jobId, job.id);
+  assert.deepEqual(body.events, [{ type: 'transcript_failed', atMs: Date.parse(job.updatedAt), positionMs: 73000, attempts: 2 }]);
+  assert.equal(diagnosticApi.diagnosticPreview(body), latest.diagnosticPreview);
+  e.account.returnToCurrent();
+  assert.equal(e.account.getSnapshot().diagnosticId, '');
+  e.account.selectReading(otherId);
+  await settle();
+  e.account.previewDiagnostic('transcription');
+  assert.notEqual(e.account.getSnapshot().diagnosticId, latest.diagnosticId);
+  e.account.selectReading(mediaId);
+  await settle();
+  e.account.previewDiagnostic('transcription');
+  assert.equal(e.account.getSnapshot().diagnosticId, latest.diagnosticId);
+  assert.equal(e.account.getSnapshot().diagnosticPreview, latest.diagnosticPreview);
+  upload.resolve({ reportId: latest.diagnosticId });
+  await sending;
+  assert.equal(e.account.getSnapshot().diagnosticPhase, 'preview');
+  await e.account.logout();
+  await signIn(e);
+  e.account.setLibraryOpen(true);
+  await settle();
+  e.account.selectReading(mediaId);
+  await settle();
+  e.account.previewDiagnostic('transcription');
+  assert.notEqual(e.account.getSnapshot().diagnosticId, '');
+  assert.notEqual(e.account.getSnapshot().diagnosticId, latest.diagnosticId);
+  checks.push('archived reading item diagnostics bind to its latest failed job; old receipt hidden after leaving that item');
+  e.account.release();
 }
 console.log(JSON.stringify({passed:true,checks},null,2));
 

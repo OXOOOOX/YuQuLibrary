@@ -1,19 +1,49 @@
 import { common, wantAgent, WantAgent } from '@kit.AbilityKit';
 import { audio } from '@kit.AudioKit';
+import { preferences } from '@kit.ArkData';
 import { avSession } from '@kit.AVSessionKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { media } from '@kit.MediaKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { PlaybackCacheDownload } from './PlaybackCache';
+import { DiagnosticReport, PlaybackDiagnostics } from './DiagnosticReport';
 
 const SAMPLE_FILE: string = 'playback-check.wav';
 const LOG_LIMIT: number = 18;
+const RECONNECT_DELAYS_MS: number[] = [0, 2000, 8000];
+const STABLE_PLAYBACK_MS: number = 15000;
+
+interface RecoveryPoint {
+  generation: number;
+  positionMs: number;
+  rate: number;
+  looping: boolean;
+}
+
+class PlaybackSourceError extends Error {
+  readonly code: number;
+  readonly retryPrepare: boolean;
+  constructor(code: number, preparing: boolean = false) {
+    super('播放器读取音频失败');
+    this.code = code;
+    this.retryPrepare = preparing && code === 5400102;
+  }
+}
+
+function retryablePlaybackError(code: number): boolean {
+  return code === 5400103 || code === 5400104 || (code >= 5411001 && code <= 5411004);
+}
 
 export interface PlaybackViewState {
   mediaVersionId: string;
   contentId: string;
   title: string;
   buffering: boolean;
+  recovering: boolean;
+  cacheEnabled: boolean;
+  cacheStatus: string;
+  cachePercent: number;
   ready: boolean;
   busy: boolean;
   playerState: string;
@@ -25,6 +55,7 @@ export interface PlaybackViewState {
   backgroundStatus: string;
   foreground: boolean;
   error: string;
+  diagnosticIncidentId: string;
   events: string[];
 }
 
@@ -41,6 +72,8 @@ export class PlaybackService {
   private rawFileOpen: boolean = false;
   private closing: boolean = false;
   private lifecycleGeneration: number = 0;
+  private diagnosticGeneration: number = -1;
+  private diagnostics: PlaybackDiagnostics = new PlaybackDiagnostics();
   private commandQueue: Promise<void> = Promise.resolve();
   private sessionQueue: Promise<void> = Promise.resolve();
   private pendingCommands: number = 0;
@@ -51,13 +84,35 @@ export class PlaybackService {
   private prepareTimer: number = -1;
   private sourceUrl: string = '';
   private sourceToken: string = '';
+  private pendingCache?: PlaybackCacheDownload;
+  private playingCache?: PlaybackCacheDownload;
+  private cachedSource?: media.AVFileDescriptor;
+  private cancelCacheWait?: () => void;
+  private failRecoveryWait?: (error: Error) => void;
+  private recovery?: RecoveryPoint;
+  private failedPlayer?: media.AVPlayer;
+  private recoveringPlayer?: media.AVPlayer;
+  private recoveryTimer: number = -1;
+  private recoveryAttempts: number = 0;
+  private stableSince: number = 0;
+  private stablePositionMs: number = 0;
+  private wantsPlayback: boolean = false;
+  private recoveryAllowed?: () => boolean;
+  private switchingFrom?: media.AVPlayer;
+  private pendingSeek?: number;
+  private seekTimer: number = -1;
+  private confirmedSeekAt: number = -1;
+  private confirmedSeekMs: number = 0;
+  private divergentSince: number = -1;
+  private divergentSamples: number = 0;
+  private pendingRate?: number;
   private playbackAllowed: (() => boolean) | undefined = undefined;
   private state: PlaybackViewState = {
     mediaVersionId: 'fixture-pcm-v1', contentId: 'yuqu-playback-check-v1',
-    title: '两分钟播放验证音频', buffering: false,
+    title: '两分钟播放验证音频', buffering: false, recovering: false, cacheEnabled: false, cacheStatus: 'idle', cachePercent: 0,
     ready: false, busy: false, playerState: 'idle', positionMs: 0,
     durationMs: 0, rate: 1, looping: false, backgroundActive: false,
-    backgroundStatus: '未申请', foreground: true, error: '', events: []
+    backgroundStatus: '未申请', foreground: true, error: '', diagnosticIncidentId: '', events: []
   };
 
   private constructor() {}
@@ -69,14 +124,26 @@ export class PlaybackService {
   getSnapshot(): PlaybackViewState {
     return {
       mediaVersionId: this.state.mediaVersionId, contentId: this.state.contentId,
-      title: this.state.title, buffering: this.state.buffering,
+      title: this.state.title, buffering: this.state.buffering, recovering: this.state.recovering,
+      cacheEnabled: this.state.cacheEnabled, cacheStatus: this.state.cacheStatus, cachePercent: this.state.cachePercent,
       ready: this.state.ready, busy: this.state.busy,
       playerState: this.state.playerState, positionMs: this.state.positionMs,
       durationMs: this.state.durationMs, rate: this.state.rate,
       looping: this.state.looping, backgroundActive: this.state.backgroundActive,
       backgroundStatus: this.state.backgroundStatus, foreground: this.state.foreground,
-      error: this.state.error, events: this.state.events.slice()
+      error: this.state.error, diagnosticIncidentId: this.diagnostics.incidentId, events: this.state.events.slice()
     };
+  }
+
+  getDiagnosticReport(): DiagnosticReport | undefined {
+    return this.diagnostics.snapshot();
+  }
+
+  clearDiagnosticReports(): void {
+    const hadReport = this.diagnostics.incidentId.length > 0;
+    this.diagnosticGeneration = -1;
+    this.diagnostics.reset();
+    if (hadReport) this.emit();
   }
 
   subscribe(listener: PlaybackListener): () => void {
@@ -90,7 +157,23 @@ export class PlaybackService {
     };
   }
 
-  setPlaybackPermission(check: () => boolean): void { this.playbackAllowed = check; }
+  setPlaybackPermission(check: () => boolean, recover?: () => boolean): void {
+    this.playbackAllowed = check;
+    this.recoveryAllowed = recover ?? check;
+  }
+
+  setPlaybackCacheEnabled(enabled: boolean): void {
+    this.state.cacheEnabled = enabled;
+    if (!enabled) this.cancelPendingCache();
+    else if (this.state.playerState === 'playing') this.startCache();
+    this.emit();
+    if (this.context === undefined) return;
+    try {
+      const store = preferences.getPreferencesSync(this.context, { name: 'playback' });
+      store.putSync('cacheCurrentEpisode', enabled);
+      void store.flush().catch(() => { this.log('本次设置已生效，设备未能保存偏好'); });
+    } catch (_error) { this.log('本次设置已生效，设备未能保存偏好'); }
+  }
 
   initialize(context: common.UIAbilityContext): Promise<void> {
     if (this.player !== undefined && !this.closing) {
@@ -103,6 +186,10 @@ export class PlaybackService {
       }
       this.closing = false;
       this.context = context;
+      try {
+        const store = preferences.getPreferencesSync(context, { name: 'playback' });
+        this.state.cacheEnabled = store.getSync('cacheCurrentEpisode', false) === true;
+      } catch (_error) { this.state.cacheEnabled = false; }
       if (this.player !== undefined) {
         return;
       }
@@ -119,7 +206,11 @@ export class PlaybackService {
   }
 
   cancelMediaLoading(): void {
-    if (this.state.ready) return;
+    this.clearPendingSeek();
+    this.cancelRecovery();
+    this.cancelPendingCache();
+    if (this.state.ready && this.playingCache === undefined) return;
+    this.state.ready = false;
     ++this.lifecycleGeneration;
     this.finishPreparing(new Error('已取消音频加载'));
     void this.enqueue('取消加载', async () => { await this.disposeResources(); });
@@ -136,8 +227,22 @@ export class PlaybackService {
       throw new Error('音频服务地址无效');
     }
     if (!fixture && token.length === 0) throw new Error('请先登录后播放资料');
-    if (this.state.ready && this.state.mediaVersionId === mediaVersionId && this.sourceToken === token) return;
+    const sourceUrl = fixture ? '' : `${baseUrl}/api/media/${encodeURIComponent(mediaVersionId)}`;
+    if (this.state.ready && this.state.mediaVersionId === mediaVersionId && this.sourceToken === token && this.sourceUrl === sourceUrl) {
+      if (token.length === 0 && this.diagnosticGeneration !== -1) this.clearDiagnosticReports();
+      if (token.length > 0 && this.diagnosticGeneration !== this.lifecycleGeneration) {
+        this.diagnosticGeneration = this.lifecycleGeneration;
+        this.diagnostics.reset(mediaVersionId);
+        this.diagnostics.record(this.state.foreground ? 'foreground' : 'background', this.state.positionMs);
+      }
+      return;
+    }
     const generation: number = ++this.lifecycleGeneration;
+    this.diagnostics.reset();
+    this.diagnosticGeneration = token.length > 0 ? generation : -1;
+    this.cancelRecovery();
+    this.recoveryAttempts = 0;
+    this.cancelPendingCache();
     this.finishPreparing(new Error('已切换音频，取消旧加载'));
     this.state.ready = false;
     this.state.buffering = false;
@@ -146,11 +251,15 @@ export class PlaybackService {
       this.assertLive(generation);
       await this.disposeResources();
       this.assertLive(generation);
-      this.sourceUrl = fixture ? '' : `${baseUrl}/api/media/${encodeURIComponent(mediaVersionId)}`;
-      this.sourceToken = fixture ? '' : token;
+      this.sourceUrl = sourceUrl;
+      this.sourceToken = token;
       this.state.mediaVersionId = mediaVersionId;
       this.state.contentId = contentId;
       this.state.title = title.slice(0, 300);
+      if (this.diagnosticGeneration === generation) {
+        this.diagnostics.reset(mediaVersionId);
+        this.diagnostics.record(this.state.foreground ? 'foreground' : 'background', 0);
+      }
       this.state.error = '';
       this.state.looping = false;
       await this.createResources(generation);
@@ -170,6 +279,7 @@ export class PlaybackService {
       if (player.state !== 'prepared' && player.state !== 'paused' && player.state !== 'completed') {
         throw new Error('音频尚未准备好，请等待加载完成。');
       }
+      this.wantsPlayback = true;
       await player.play();
       this.assertLive(generation);
       try {
@@ -181,10 +291,12 @@ export class PlaybackService {
         throw error as Error;
       }
       await this.syncSession();
+      this.startCache();
     });
   }
 
   pause(): Promise<void> {
+    this.cancelRecovery();
     return this.enqueue('暂停', async () => {
       await this.pauseInternal();
     });
@@ -195,7 +307,16 @@ export class PlaybackService {
       const player: media.AVPlayer = this.requirePlayer();
       this.requireSeekable(player);
       const target: number = Math.round(Math.max(0, Math.min(positionMs, player.duration)));
-      player.seek(target, media.SeekMode.SEEK_CLOSEST);
+      this.clearPendingSeek();
+      this.pendingSeek = target;
+      this.diagnostics.record('seek', target);
+      const generation = this.lifecycleGeneration;
+      this.seekTimer = setTimeout(() => {
+        if (generation !== this.lifecycleGeneration || this.player !== player || this.pendingSeek !== target) return;
+        this.stopAtTrustedPosition(player, '跳转未获确认，已保留上次进度，可重新播放本期。');
+      }, 15000);
+      try { player.seek(target, media.SeekMode.SEEK_CLOSEST); }
+      catch (error) { this.clearPendingSeek(); throw error as Error; }
       // seekDone supplies the actual position; do not invent a completed seek here.
     });
   }
@@ -204,7 +325,9 @@ export class PlaybackService {
     return this.enqueue('调整倍速', async () => {
       const player: media.AVPlayer = this.requirePlayer();
       this.requireSeekable(player);
-      player.setSpeed(this.speedEnum(rate));
+      this.pendingRate = rate;
+      try { player.setSpeed(this.speedEnum(rate)); }
+      catch (error) { this.pendingRate = undefined; throw error as Error; }
     });
   }
 
@@ -218,12 +341,18 @@ export class PlaybackService {
   }
 
   setForeground(foreground: boolean): void {
+    if (this.state.foreground !== foreground) {
+      this.diagnostics.record(foreground ? 'foreground' : 'background', this.state.positionMs);
+    }
     this.state.foreground = foreground;
     this.log(foreground ? '应用回到前台' : '应用进入后台，保持播放器和媒体会话');
   }
 
   release(): Promise<void> {
     this.closing = true;
+    this.clearDiagnosticReports();
+    this.cancelRecovery();
+    this.cancelPendingCache();
     this.lifecycleGeneration += 1;
     this.finishPreparing(new Error('应用正在退出。'));
     return this.enqueue('释放', async () => {
@@ -244,10 +373,18 @@ export class PlaybackService {
       if ((this.closing && !allowClosing) || generation !== this.lifecycleGeneration) {
         return;
       }
+      const previousIncident = this.diagnostics.incidentId;
       try {
         await work();
       } catch (error) {
-        if (generation === this.lifecycleGeneration) this.reportError(label, error as BusinessError);
+        if (generation === this.lifecycleGeneration) {
+          const failure = error as BusinessError;
+          if (previousIncident === this.diagnostics.incidentId && (label === '加载音频' ||
+            (failure.code !== undefined && (label === '播放' || label === '暂停' || label === '跳转')))) {
+            this.diagnostics.fail(this.state.positionMs, false, failure.code);
+          }
+          this.reportError(label, failure);
+        }
       } finally {
         this.emit();
       }
@@ -290,16 +427,16 @@ export class PlaybackService {
       await session.setLaunchAbility(launchAgent);
       this.assertLive(generation);
       session.on('play', () => {
-        if (this.session === session && this.isCurrentPlayer(player, generation)) { void this.play(); }
+        if (this.session === session && generation === this.lifecycleGeneration) { void this.play(); }
       });
       session.on('pause', () => {
-        if (this.session === session && this.isCurrentPlayer(player, generation)) { void this.pause(); }
+        if (this.session === session && generation === this.lifecycleGeneration) { void this.pause(); }
       });
       session.on('seek', (time: number) => {
-        if (this.session === session && this.isCurrentPlayer(player, generation)) { void this.seek(time); }
+        if (this.session === session && generation === this.lifecycleGeneration) { void this.seek(time); }
       });
       session.on('setSpeed', (speed: number) => {
-        if (this.session === session && this.isCurrentPlayer(player, generation)) { void this.setRate(speed); }
+        if (this.session === session && generation === this.lifecycleGeneration) { void this.setRate(speed); }
       });
       await session.activate();
       this.assertLive(generation);
@@ -317,11 +454,7 @@ export class PlaybackService {
           this.finishPreparing(new Error('音频准备超时，请检查网络后重试。'));
         }, 20000);
         if (this.sourceUrl.length > 0) {
-          const headers: Record<string, string> = { 'Authorization': `Bearer ${this.sourceToken}` };
-          const source: media.MediaSource = media.createMediaSourceWithUrl(this.sourceUrl, headers);
-          // Some system builds return void despite the SDK Promise signature.
-          // Readiness always comes from stateChange/prepare, never this return value.
-          void Promise.resolve(player.setMediaSource(source, {})).catch((error: BusinessError) => {
+          void this.setNetworkSource(player).catch((error: BusinessError) => {
             if (this.isCurrentPlayer(player, generation)) this.finishPreparing(error);
           });
         } else if (fileSource !== undefined) player.fdSrc = fileSource;
@@ -347,12 +480,179 @@ export class PlaybackService {
     }
   }
 
-  private bindPlayer(player: media.AVPlayer, generation: number): void {
+  private setNetworkSource(player: media.AVPlayer): Promise<void> {
+    const headers: Record<string, string> = { 'Authorization': `Bearer ${this.sourceToken}` };
+    const source = media.createMediaSourceWithUrl(this.sourceUrl, headers);
+    // Some system builds return void. Readiness comes from stateChange and prepare.
+    return Promise.resolve(player.setMediaSource(source, {}));
+  }
+
+  private cancelPendingCache(): void {
+    const pending = this.pendingCache;
+    this.pendingCache = undefined;
+    pending?.cancel();
+    this.cancelCacheWait?.();
+    if (this.playingCache === undefined) {
+      this.state.cacheStatus = 'idle';
+      this.state.cachePercent = 0;
+    }
+  }
+
+  private startCache(): void {
+    if (!this.state.cacheEnabled || !this.state.ready || this.state.playerState !== 'playing' ||
+      this.context === undefined || !this.sourceUrl || this.closing || this.pendingCache || this.playingCache ||
+      (this.playbackAllowed !== undefined && !this.playbackAllowed())) return;
+    const download = new PlaybackCacheDownload();
+    this.pendingCache = download;
+    this.state.cacheStatus = 'downloading';
+    this.state.cachePercent = 0;
+    this.emit();
+    void this.cacheCurrent(download, this.lifecycleGeneration, this.context.cacheDir);
+  }
+
+  private async cacheCurrent(download: PlaybackCacheDownload, generation: number, directory: string): Promise<void> {
+    let next: media.AVPlayer | undefined = undefined;
+    let adopted = false;
+    try {
+      const source = await download.read(directory, this.sourceUrl, this.sourceToken, (percent: number) => {
+        if (this.pendingCache !== download) return;
+        this.state.cachePercent = Math.min(99, percent);
+        this.emit();
+      });
+      if (this.pendingCache !== download) return;
+      const candidate = await media.createAVPlayer();
+      next = candidate;
+      if (this.pendingCache !== download) return;
+      // Prepare a silent local player while the network player keeps sounding.
+      await this.prepareCandidate(candidate, source, false);
+      if (this.pendingCache !== download) return;
+      await this.enqueue('切换本地音频', async () => {
+        try { await this.activateCachedPlayer(candidate, download, source, generation); }
+        catch (_error) { /* Keep the network player and report a cache-only failure below. */ }
+        adopted = this.playingCache === download;
+      });
+    } catch (_error) {
+      // Storage, network or decoder failure must not interrupt the original stream.
+    } finally {
+      if (!adopted) {
+        try { if (next !== undefined) await next.release(); } catch (_error) { /* The candidate was never published. */ }
+        try { download.close(); } catch (_error) { this.log('临时缓存文件关闭失败'); }
+      }
+      if (this.pendingCache === download) {
+        this.pendingCache = undefined;
+        if (!adopted) { this.state.cacheStatus = 'failed'; this.state.cachePercent = 0; }
+        this.emit();
+      }
+    }
+  }
+
+  private prepareCandidate(player: media.AVPlayer, source: media.AVFileDescriptor | undefined, recovery: boolean): Promise<void> {
+    return this.waitPlayerEvent(player, (done, fail) => {
+      player.on('stateChange', (state: string) => {
+        if (state === 'initialized') void this.preparePlayer(player).then(done, fail);
+      });
+      if (source !== undefined) player.fdSrc = source;
+      else void this.setNetworkSource(player).catch(fail);
+    }, () => { player.off('stateChange'); }, recovery);
+  }
+
+  private waitPlayerEvent(player: media.AVPlayer, begin: (done: () => void, fail: (error: Error) => void) => void,
+    detach: () => void, recovery: boolean = false): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (recovery) this.failRecoveryWait = undefined;
+        else this.cancelCacheWait = undefined;
+        detach();
+        if (!recovery) player.off('error');
+        if (error === undefined) resolve(); else reject(error);
+      };
+      const timer = setTimeout(() => { finish(new Error('等待播放器响应超时')); }, recovery ? 15000 : 8000);
+      const cancel = (): void => { finish(new Error('已取消音频准备')); };
+      if (recovery) this.failRecoveryWait = (error: Error) => { finish(error); };
+      else {
+        this.cancelCacheWait = cancel;
+        player.on('error', (error: BusinessError) => { finish(error); });
+      }
+      try { begin(() => { finish(); }, (error: Error) => { finish(error); }); }
+      catch (error) { finish(error as Error); }
+    });
+  }
+
+  private async activateCachedPlayer(next: media.AVPlayer, download: PlaybackCacheDownload, source: media.AVFileDescriptor, generation: number): Promise<void> {
+    const previous = this.player;
+    if (previous === undefined || this.pendingCache !== download || !this.isCurrentPlayer(previous, generation) ||
+      (this.playbackAllowed !== undefined && !this.playbackAllowed())) return;
+    const resume = previous.state === 'playing';
+    const wasCompleted = previous.state === 'completed';
+    this.switchingFrom = previous;
+    try {
+      if (resume) await previous.pause();
+      if (this.pendingCache !== download) return;
+      const currentTime = this.confirmedSeekAt < 0 && Number.isFinite(previous.currentTime) ? previous.currentTime : this.state.positionMs;
+      const position = Math.max(0, Math.min(next.duration, this.pendingSeek ?? currentTime));
+      let confirmed = 0;
+      const rate = this.pendingRate ?? this.state.rate;
+      next.loop = this.state.looping;
+      if (position > 0 && !wasCompleted) {
+        await this.waitPlayerEvent(next, (done, fail) => {
+          next.on('seekDone', (time: number) => {
+            if (!Number.isFinite(time) || Math.abs(time - position) > 1500) { fail(new Error('本地音频定位失败')); return; }
+            confirmed = time;
+            done();
+          });
+          next.seek(position, media.SeekMode.SEEK_CLOSEST);
+        }, () => { next.off('seekDone'); });
+      }
+      if (this.pendingCache !== download) return;
+      if (rate !== 1) {
+        await this.waitPlayerEvent(next, (done) => {
+          next.on('speedDone', () => { done(); });
+          next.setSpeed(this.speedEnum(rate));
+        }, () => { next.off('speedDone'); });
+      }
+      if (this.pendingCache !== download || (this.playbackAllowed !== undefined && !this.playbackAllowed())) return;
+      if (resume && this.wantsPlayback) await next.play();
+      if (next.state === 'playing' && !this.wantsPlayback) await next.pause();
+      if (this.pendingCache !== download || (this.playbackAllowed !== undefined && !this.playbackAllowed())) {
+        if (next.state === 'playing') await next.pause();
+        return;
+      }
+      this.player = next;
+      this.bindPlayer(next, generation);
+      this.playingCache = download;
+      this.cachedSource = source;
+      this.state.playerState = wasCompleted ? 'completed' : next.state;
+      this.confirmSeek(wasCompleted ? next.duration : confirmed);
+      this.state.rate = rate;
+      this.pendingRate = undefined;
+      this.clearPendingSeek();
+      this.state.buffering = false;
+      this.state.cacheStatus = 'ready';
+      this.state.cachePercent = 100;
+      this.emit();
+      await previous.release();
+      await this.syncSession();
+    } finally {
+      this.switchingFrom = undefined;
+      if (resume && this.wantsPlayback && this.isCurrentPlayer(previous, generation) && this.player?.state === 'paused' &&
+        (this.playbackAllowed === undefined || this.playbackAllowed())) await previous.play();
+    }
+  }
+
+  private bindPlayer(player: media.AVPlayer, generation: number, interruptionsBound: boolean = false): void {
     player.on('stateChange', (state: string) => {
       if (!this.isCurrentPlayer(player, generation)) {
         return;
       }
       this.state.playerState = state;
+      if (state === 'playing' || state === 'paused') {
+        this.diagnostics.record(state === 'playing' ? 'play' : 'pause', this.state.positionMs);
+      }
+      if (state !== 'playing') this.divergentSince = -1;
       this.log(`播放器状态：${state}`);
       if (state === 'initialized') {
         this.preparePlayer(player).then(() => {
@@ -361,10 +661,14 @@ export class PlaybackService {
           }
         }).catch((error: BusinessError) => {
           if (this.isCurrentPlayer(player, generation)) {
-            this.finishPreparing(new Error(error.message));
+            this.finishPreparing(error);
           }
         });
       } else if (state === 'completed') {
+        this.wantsPlayback = false;
+        this.clearPendingSeek();
+        this.confirmedSeekAt = -1;
+        if (player.duration > 0) this.state.positionMs = player.duration;
         void this.enqueue('播放结束', async () => {
           if (!this.isCurrentPlayer(player, generation) || player.state !== 'completed') { return; }
           await this.stopBackgroundTask();
@@ -380,6 +684,15 @@ export class PlaybackService {
     });
     player.on('timeUpdate', (time: number) => {
       if (!this.isCurrentPlayer(player, generation)) { return; }
+      if (!this.trustTimeUpdate(time, player)) return;
+      if (this.recoveryAttempts > 0 && this.wantsPlayback && player.state === 'playing' && this.pendingSeek === undefined) {
+        if (this.stableSince === 0 || time < this.stablePositionMs) {
+          this.stableSince = Date.now();
+          this.stablePositionMs = time;
+        } else if (Date.now() - this.stableSince >= STABLE_PLAYBACK_MS && time - this.stablePositionMs >= STABLE_PLAYBACK_MS) {
+          this.recoveryAttempts = 0;
+        }
+      }
       this.state.positionMs = Math.max(0, time);
       this.emit();
       if (Date.now() - this.lastSessionUpdate >= 1000) {
@@ -389,29 +702,77 @@ export class PlaybackService {
     });
     player.on('seekDone', (time: number) => {
       if (!this.isCurrentPlayer(player, generation)) { return; }
-      this.state.positionMs = time;
+      if (!Number.isFinite(time) || time < 0 || (this.pendingSeek !== undefined && Math.abs(time - this.pendingSeek) > 1500)) return;
+      this.clearPendingSeek();
+      this.stableSince = 0;
+      this.confirmSeek(time);
+      this.diagnostics.record('seek_done', this.state.positionMs);
       this.log(`跳转完成：${Math.round(time / 1000)} 秒`);
       void this.syncSession();
     });
     player.on('speedDone', (speed: number) => {
       if (!this.isCurrentPlayer(player, generation)) { return; }
+      this.pendingRate = undefined;
       this.state.rate = this.speedRatio(speed);
       this.log(`倍速已生效：${this.state.rate}×`);
       void this.syncSession();
     });
     player.on('bufferingUpdate', (infoType: media.BufferingInfoType, _value: number) => {
       if (!this.isCurrentPlayer(player, generation)) return;
-      if (infoType === media.BufferingInfoType.BUFFERING_START) this.state.buffering = true;
-      if (infoType === media.BufferingInfoType.BUFFERING_END) this.state.buffering = false;
+      if (infoType === media.BufferingInfoType.BUFFERING_START) {
+        if (!this.state.buffering) this.diagnostics.record('buffer_start', this.state.positionMs);
+        this.state.buffering = true;
+        this.divergentSince = -1;
+      }
+      if (infoType === media.BufferingInfoType.BUFFERING_END) {
+        if (this.state.buffering) this.diagnostics.record('buffer_end', this.state.positionMs);
+        this.state.buffering = false;
+      }
       this.emit();
     });
+    if (!interruptionsBound) this.bindInterruptions(player, generation);
+    player.on('error', (error: BusinessError) => {
+      if (!this.isCurrentPlayer(player, generation)) return;
+      const recover = this.state.ready && this.wantsPlayback && this.sourceUrl.length > 0 &&
+        retryablePlaybackError(error.code) && this.recoveryAttempts < RECONNECT_DELAYS_MS.length &&
+        (this.recoveryAllowed === undefined || this.recoveryAllowed());
+      this.diagnostics.fail(this.state.positionMs, recover, error.code);
+      this.failedPlayer = player;
+      this.clearPendingSeek();
+      this.state.ready = false;
+      this.state.buffering = false;
+      this.state.playerState = 'error';
+      this.finishPreparing(error);
+      if (recover) {
+        const point: RecoveryPoint = { generation: generation, positionMs: this.state.positionMs,
+          rate: this.pendingRate ?? this.state.rate, looping: this.state.looping };
+        this.recovery = point;
+        this.state.recovering = true;
+        this.cancelPendingCache();
+        this.state.error = '';
+        this.log(`播放中断 (${error.code})，正在从上次位置重新连接`);
+        this.scheduleRecovery(point);
+      } else {
+        this.wantsPlayback = false;
+        this.reportError('播放器', error);
+        void this.enqueue('处理播放错误', async () => {
+          if (generation !== this.lifecycleGeneration || this.player !== player) return;
+          await this.stopBackgroundTask();
+          await this.syncSession();
+        });
+      }
+    });
+  }
+
+  private bindInterruptions(player: media.AVPlayer, generation: number): void {
     player.on('audioInterrupt', (event: audio.InterruptEvent) => {
-      if (!this.isCurrentPlayer(player, generation)) { return; }
+      if (this.closing || this.lifecycleGeneration !== generation || (this.player !== player && this.recoveringPlayer !== player)) return;
       this.log(`音频中断提示：${event.hintType}`);
       if (event.hintType === audio.InterruptHint.INTERRUPT_HINT_PAUSE ||
         event.hintType === audio.InterruptHint.INTERRUPT_HINT_STOP) {
+        this.cancelRecovery();
         void this.enqueue('处理中断', async () => {
-          if (!this.isCurrentPlayer(player, generation)) { return; }
+          if (this.closing || this.lifecycleGeneration !== generation) return;
           await this.pauseInternal();
           this.log('已因音频中断暂停，请手动继续播放');
         });
@@ -420,28 +781,237 @@ export class PlaybackService {
       }
     });
     player.on('audioOutputDeviceChangeWithInfo', (info: audio.AudioStreamDeviceChangeInfo) => {
-      if (!this.isCurrentPlayer(player, generation)) { return; }
+      if (this.closing || this.lifecycleGeneration !== generation || (this.player !== player && this.recoveringPlayer !== player)) return;
       this.log(`输出设备变化：${info.changeReason}`);
       if (info.changeReason === audio.AudioStreamDeviceChangeReason.REASON_OLD_DEVICE_UNAVAILABLE) {
+        this.cancelRecovery();
         void this.enqueue('耳机断开', async () => {
-          if (!this.isCurrentPlayer(player, generation)) { return; }
+          if (this.closing || this.lifecycleGeneration !== generation) return;
           await this.pauseInternal();
           this.log('旧输出设备断开，已暂停，避免自动外放');
         });
       }
     });
-    player.on('error', (error: BusinessError) => {
-      if (!this.isCurrentPlayer(player, generation)) { return; }
-      this.state.ready = false;
-      this.state.playerState = 'error';
-      this.reportError('播放器', error);
-      this.finishPreparing(new Error(error.message));
-      void this.enqueue('处理播放错误', async () => {
-        if (!this.isCurrentPlayer(player, generation)) { return; }
-        await this.stopBackgroundTask();
-        await this.syncSession();
-      });
+  }
+
+  private cancelRecovery(): void {
+    this.wantsPlayback = false;
+    this.stableSince = 0;
+    if (this.recovery === undefined) return;
+    this.diagnostics.endRecovery();
+    this.recovery = undefined;
+    this.state.recovering = false;
+    this.state.error = '重连已停止，可重新播放本期。';
+    clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = -1;
+    this.failRecoveryWait?.(new Error('已取消重连'));
+    this.emit();
+  }
+
+  private confirmSeek(time: number): void {
+    this.state.positionMs = time;
+    this.confirmedSeekAt = Date.now();
+    this.confirmedSeekMs = time;
+    this.divergentSince = -1;
+  }
+
+  private clearPendingSeek(): void {
+    clearTimeout(this.seekTimer);
+    this.seekTimer = -1;
+    this.pendingSeek = undefined;
+  }
+
+  private stopAtTrustedPosition(player: media.AVPlayer, message: string): void {
+    this.diagnostics.fail(this.state.positionMs, false);
+    this.clearPendingSeek();
+    this.failedPlayer = player;
+    this.cancelRecovery();
+    this.cancelPendingCache();
+    this.state.ready = false;
+    this.state.buffering = false;
+    this.state.playerState = 'error';
+    this.state.error = message;
+    this.log(message);
+    void this.enqueue('暂停未对齐的播放', async () => {
+      if (this.player === player) await this.pauseInternal();
     });
+  }
+
+  private trustTimeUpdate(time: number, player: media.AVPlayer): boolean {
+    if (!Number.isFinite(time) || time < 0 || this.pendingSeek !== undefined) return false;
+    if (this.confirmedSeekAt < 0) return true;
+    // AVPlayer can briefly publish the end of the file both before and just after seekDone.
+    const elapsed = Math.max(0, Date.now() - this.confirmedSeekAt);
+    const advance = time - this.confirmedSeekMs;
+    const maxAdvance = elapsed * 2 + 1500; // Highest supported playback speed is 2x.
+    const wrapped = this.state.looping && time <= 1500 && this.state.durationMs - this.confirmedSeekMs <= maxAdvance;
+    if (!wrapped && (advance < -1500 || advance > maxAdvance)) {
+      if (player.state === 'playing' && !this.state.buffering) {
+        const now = Date.now();
+        if (this.divergentSince < 0) { this.divergentSince = now; this.divergentSamples = 0; }
+        this.divergentSamples++;
+        if (this.divergentSamples >= 3 && now - this.divergentSince >= 5000) {
+          this.stopAtTrustedPosition(player, '播放器持续偏离已确认的位置，已暂停，可从上次进度重新播放。');
+        }
+      }
+      return false;
+    }
+    this.divergentSince = -1;
+    if (wrapped || (elapsed >= 1000 && advance >= 2000)) this.confirmedSeekAt = -1;
+    return true;
+  }
+
+  private recoveryLive(point: RecoveryPoint): boolean {
+    return this.recovery === point && this.wantsPlayback && !this.closing &&
+      point.generation === this.lifecycleGeneration && (this.recoveryAllowed === undefined || this.recoveryAllowed());
+  }
+
+  private scheduleRecovery(point: RecoveryPoint): void {
+    // Keep a bad segment bounded, but allow later independent interruptions to recover.
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = -1;
+      if (this.recovery !== point) return;
+      void this.enqueue('恢复播放', async () => {
+        try {
+          if (!this.recoveryLive(point)) throw new Error('已取消重连');
+          ++this.recoveryAttempts;
+          this.diagnostics.record('retry', point.positionMs);
+          await this.reconnect(point);
+        } catch (error) {
+          if (this.recovery !== point) return;
+          const code = (error as BusinessError).code;
+          const live = this.recoveryLive(point);
+          if (live) this.diagnostics.record('error', point.positionMs, code);
+          hilog.warn(0x1000, 'YuQuPlayback', 'Reconnect attempt=%{public}d error=%{public}d active=%{public}d',
+            this.recoveryAttempts, code ?? -1, live ? 1 : 0);
+          const transient = code === undefined || retryablePlaybackError(code) ||
+            (error instanceof PlaybackSourceError && error.retryPrepare);
+          if (live && this.recoveryAttempts < RECONNECT_DELAYS_MS.length && transient) {
+            this.scheduleRecovery(point);
+          } else {
+            this.cancelRecovery();
+            this.state.error = '播放中断，可重新播放本期。';
+            this.log(this.state.error);
+            await this.stopBackgroundTask();
+            await this.syncSession();
+          }
+        }
+      });
+    }, RECONNECT_DELAYS_MS[this.recoveryAttempts]);
+  }
+
+  private async reconnect(point: RecoveryPoint): Promise<void> {
+    // Release the previous decoder before reusing its local file descriptor.
+    const old = this.player ?? this.retiringPlayer;
+    if (old !== undefined) {
+      this.retiringPlayer = old;
+      await old.release();
+      this.retiringPlayer = undefined;
+      this.player = undefined;
+      this.failedPlayer = undefined;
+    }
+    if (!this.recoveryLive(point)) throw new Error('已取消重连');
+    const candidate = await media.createAVPlayer();
+    this.recoveringPlayer = candidate;
+    const source = this.recoveryAttempts === 1 ? this.cachedSource : undefined;
+    let failure: BusinessError | undefined = undefined;
+    let preparing = true;
+    const check = (): void => {
+      if (failure !== undefined) throw new PlaybackSourceError(failure.code, preparing);
+      if (!this.recoveryLive(point)) throw new Error('已取消重连');
+    };
+    try {
+      check();
+      // Keep errors observable between seek, rate and play callbacks and while renewing background playback.
+      candidate.on('error', (error: BusinessError) => {
+        if (this.recoveringPlayer !== candidate) return;
+        hilog.warn(0x1000, 'YuQuPlayback', 'Replacement decoder error=%{public}d', error.code);
+        failure = error;
+        this.failRecoveryWait?.(error);
+      });
+      this.bindInterruptions(candidate, point.generation);
+      try {
+        await this.prepareCandidate(candidate, source, true);
+      } catch (error) {
+        // On a truncated HTTP source the SDK may reject prepare with 5400102 instead of delivering its network error.
+        if ((error as BusinessError).code === 5400102) throw new PlaybackSourceError(5400102, true);
+        throw error as Error;
+      }
+      check();
+      preparing = false;
+      if (candidate.duration <= 0 || point.positionMs > candidate.duration + 1500) throw new Error('音频时长已改变');
+      let confirmed = 0;
+      candidate.loop = point.looping;
+      if (point.positionMs > 0) {
+        await this.waitPlayerEvent(candidate, (done, fail) => {
+          candidate.on('seekDone', (time: number) => {
+            if (!Number.isFinite(time) || Math.abs(time - point.positionMs) > 1500) { fail(new Error('未能恢复播放位置')); return; }
+            confirmed = time;
+            if (this.recoveryLive(point)) this.diagnostics.record('seek_done', time);
+            done();
+          });
+          const target = Math.min(point.positionMs, candidate.duration);
+          this.diagnostics.record('seek', target);
+          candidate.seek(target, media.SeekMode.SEEK_CLOSEST);
+        }, () => { candidate.off('seekDone'); }, true);
+      }
+      check();
+      if (point.rate !== 1) {
+        await this.waitPlayerEvent(candidate, (done, fail) => {
+          candidate.on('speedDone', (value: number) => {
+            if (this.speedRatio(value) === point.rate) done();
+            else fail(new Error('未能恢复播放倍速'));
+          });
+          candidate.setSpeed(this.speedEnum(point.rate));
+        }, () => { candidate.off('speedDone'); }, true);
+      }
+      check();
+      await this.waitPlayerEvent(candidate, (done, fail) => {
+        candidate.on('stateChange', (state: string) => { if (state === 'playing') done(); });
+        void candidate.play().catch(fail);
+      }, () => { candidate.off('stateChange'); }, true);
+      check();
+      await this.startBackgroundTask();
+      check();
+      if (candidate.state !== 'playing') throw new Error('播放器未能启动');
+      if (source === undefined && this.playingCache !== undefined) {
+        this.playingCache.close();
+        this.playingCache = undefined;
+        this.cachedSource = undefined;
+        this.state.cacheStatus = 'idle';
+        this.state.cachePercent = 0;
+      }
+      candidate.off('error');
+      this.player = candidate;
+      this.recovery = undefined;
+      this.state.recovering = false;
+      this.state.ready = true;
+      this.confirmSeek(confirmed);
+      this.diagnostics.record('resumed', confirmed);
+      this.state.rate = point.rate;
+      this.state.playerState = 'playing';
+      this.stableSince = Date.now();
+      this.stablePositionMs = confirmed;
+      this.pendingRate = undefined;
+      this.clearPendingSeek();
+      this.bindPlayer(candidate, point.generation, true);
+      this.log('已从中断位置继续播放');
+      await this.syncSession();
+      this.startCache();
+    } finally {
+      const adopted = this.player === candidate;
+      try {
+        if (!adopted) {
+          this.retiringPlayer = candidate;
+          await candidate.release();
+          this.retiringPlayer = undefined;
+        }
+      } finally {
+        this.recoveringPlayer = undefined;
+        // A prepare/seek promise may reject for its current state before the native source error is delivered.
+        if (!adopted) check();
+      }
+    }
   }
 
   private async preparePlayer(player: media.AVPlayer): Promise<void> {
@@ -470,6 +1040,7 @@ export class PlaybackService {
   }
 
   private async pauseInternal(): Promise<void> {
+    this.cancelRecovery();
     const player: media.AVPlayer | undefined = this.player;
     if (player !== undefined && player.state === 'playing') {
       // A forced interruption can pause the stream without updating AVPlayer.state.
@@ -550,6 +1121,10 @@ export class PlaybackService {
   }
 
   private async disposeResources(): Promise<void> {
+    this.cancelPendingCache();
+    this.clearPendingSeek();
+    this.confirmedSeekAt = -1;
+    this.pendingRate = undefined;
     this.finishPreparing(new Error('播放资源已重置。'));
     this.state.ready = false;
     try {
@@ -578,6 +1153,7 @@ export class PlaybackService {
       try {
         await player.release();
         this.retiringPlayer = undefined;
+        this.failedPlayer = undefined;
       } catch (error) {
         this.reportError('释放播放器', error as BusinessError);
       }
@@ -615,6 +1191,13 @@ export class PlaybackService {
         this.reportError('关闭音频资源', error as BusinessError);
       }
     }
+    if (this.retiringPlayer === undefined && this.playingCache !== undefined) {
+      this.playingCache.close();
+      this.playingCache = undefined;
+      this.cachedSource = undefined;
+      this.state.cacheStatus = 'idle';
+      this.state.cachePercent = 0;
+    }
     this.launchAgent = undefined;
     this.state.playerState = 'idle';
     this.state.positionMs = 0;
@@ -636,7 +1219,8 @@ export class PlaybackService {
   }
 
   private isCurrentPlayer(player: media.AVPlayer, generation: number): boolean {
-    return !this.closing && generation === this.lifecycleGeneration && this.player === player;
+    return !this.closing && generation === this.lifecycleGeneration && this.player === player &&
+      this.switchingFrom !== player && this.failedPlayer !== player;
   }
 
   private requirePlayer(): media.AVPlayer {

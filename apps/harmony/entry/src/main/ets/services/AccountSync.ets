@@ -5,12 +5,14 @@ import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { EventStream, StreamEvent, StreamState } from './EventStream';
 import { PlaybackService, PlaybackViewState } from './PlaybackService';
+import { DiagnosticReport, createTranscriptDiagnosticReport, diagnosticPreview } from './DiagnosticReport';
 import { SessionVault, StoredSession } from './SessionVault';
 
 interface AccountUser { id: string; email: string; }
 interface DeviceSession { id: string; deviceName: string; client: string; expiresAt: string; }
 interface ApiErrorValue { code: string; message: string; }
 interface ApiReply {
+  reportId?: string;
   items?: LibraryItem[];
   usage?: LibraryUsage;
   jobs?: ImportJob[];
@@ -94,6 +96,7 @@ export interface ImportJob {
 }
 export interface FeedEpisode { url: string; title: string; }
 export interface TranscriptJob {
+  sourceLabel?: string;
   id: string; status: string; attempts: number; durationMs: number; completedMs: number;
   model: string | null; error: string | null; updatedAt: string;
 }
@@ -117,6 +120,12 @@ class ApiFailure extends Error {
 }
 
 export interface AccountViewState {
+  diagnosticId: string;
+  diagnosticKind: string;
+  diagnosticPhase: string;
+  diagnosticPreview: string;
+  diagnosticError: string;
+  transcriptDiagnosticAvailable: boolean;
   title: string;
   mediaVersionId: string;
   libraryItems: LibraryItem[];
@@ -287,6 +296,13 @@ export class AccountSync {
   private transcriptError: string = '';
   private transcriptJob: TranscriptJob | null = null;
   private transcriptIdentity: string = '';
+  private failedTranscriptAt: number = -1;
+  private transcriptDiagnostics: Map<string, DiagnosticReport> = new Map<string, DiagnosticReport>();
+  private diagnosticDraft: DiagnosticReport | undefined = undefined;
+  private diagnosticPhase: string = '';
+  private diagnosticAttempt: number = 0;
+  private diagnosticText: string = '';
+  private diagnosticError: string = '';
   private transcriptSegments: TranscriptSegment[] = [];
   private transcriptPageCursor: number = -1;
   private transcriptNextCursor: number | null = null;
@@ -396,7 +412,7 @@ export class AccountSync {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
-    this.player.setPlaybackPermission(() => this.mayControl());
+    this.player.setPlaybackPermission(() => this.mayControl(), () => this.controlsCurrentMedia());
     const lifecycle: number = ++this.lifecycle;
     this.unsubscribePlayer = this.player.subscribe((state: PlaybackViewState) => { this.observePlayer(state); });
     this.ticker = setInterval(() => { this.tick(); }, 1000);
@@ -446,6 +462,9 @@ export class AccountSync {
     }
     return {
       title: loggedIn ? snapshot?.title ?? '正在读取内容' : local.title,
+      diagnosticId: this.diagnosticDraft?.reportId ?? '', diagnosticKind: this.diagnosticDraft?.kind ?? '',
+      diagnosticPhase: this.diagnosticPhase, diagnosticPreview: this.diagnosticText, diagnosticError: this.diagnosticError,
+      transcriptDiagnosticAvailable: this.canReportTranscript(),
       mediaVersionId: loggedIn ? snapshot?.mediaVersionId ?? '' : local.mediaVersionId,
       libraryItems: this.libraryItems.slice(), importJobs: this.importJobs.slice(),
       libraryUsage: this.libraryUsage,
@@ -647,8 +666,7 @@ export class AccountSync {
       await this.player.pause();
       this.assertControl(lifecycle, epoch);
       await this.player.loadMedia(snapshot.contentId, snapshot.mediaVersionId, snapshot.title ?? '鱼趣音频',
-        snapshot.mediaVersionId === 'fixture-pcm-v1' ? '' : this.baseUrl,
-        snapshot.mediaVersionId === 'fixture-pcm-v1' ? '' : this.token);
+        snapshot.mediaVersionId === 'fixture-pcm-v1' ? '' : this.baseUrl, this.token);
       this.assertControl(lifecycle, epoch);
       await this.waitReady(lifecycle, epoch, snapshot.mediaVersionId);
       const position: number = this.projectPosition(snapshot);
@@ -827,6 +845,97 @@ export class AccountSync {
 
   private contentMediaId(): string { return this.readingItem?.mediaVersionId ?? this.snapshot?.mediaVersionId ?? ''; }
   private contentDurationMs(): number { return this.readingItem?.durationMs ?? this.snapshot?.durationMs ?? 0; }
+
+  private canReportTranscript(): boolean {
+    const job: TranscriptJob | null = this.transcriptJob;
+    return this.profile !== undefined && this.contentMediaId().length > 0 && job !== null &&
+      job.status === 'failed' && job.id === this.transcriptIdentity && Number.isSafeInteger(job.attempts) &&
+      job.attempts >= 0 && this.failedTranscriptAt > 0 && Date.parse(job.updatedAt) === this.failedTranscriptAt;
+  }
+
+  private diagnosticMatches(report: DiagnosticReport): boolean {
+    if (this.profile === undefined) return false;
+    if (report.kind === 'playback') {
+      const local: PlaybackViewState = this.player.getSnapshot();
+      return report.mediaVersionId === this.snapshot?.mediaVersionId && report.mediaVersionId === local.mediaVersionId &&
+        report.reportId === local.diagnosticIncidentId;
+    }
+    return this.canReportTranscript() && report.mediaVersionId === this.contentMediaId() &&
+      report.jobId === this.transcriptIdentity && report.events[0].atMs === this.failedTranscriptAt;
+  }
+
+  previewDiagnostic(kind: string): void {
+    if (this.profile === undefined || this.diagnosticPhase === 'sending') return;
+    let report: DiagnosticReport | undefined = undefined;
+    if (kind === 'playback') {
+      const local: PlaybackViewState = this.player.getSnapshot();
+      if (!local.diagnosticIncidentId || local.mediaVersionId !== this.snapshot?.mediaVersionId) return;
+      report = this.player.getDiagnosticReport();
+    } else if (kind === 'transcription' && this.transcriptJob !== null && this.canReportTranscript()) {
+      const mediaId: string = this.contentMediaId();
+      report = this.transcriptDiagnostics.get(mediaId);
+      if (report === undefined || !this.diagnosticMatches(report)) {
+        const job: TranscriptJob = this.transcriptJob;
+        report = createTranscriptDiagnosticReport(mediaId, job.id, job.completedMs, job.attempts, this.failedTranscriptAt);
+        this.transcriptDiagnostics.set(mediaId, report);
+      }
+    }
+    if (report === undefined || report.kind !== kind || !this.diagnosticMatches(report) ||
+      (this.diagnosticDraft?.reportId === report.reportId && this.diagnosticPhase === 'sent')) return;
+    this.diagnosticDraft = report;
+    this.diagnosticText = diagnosticPreview(report);
+    this.diagnosticPhase = 'preview';
+    this.diagnosticError = '';
+    this.emit();
+  }
+
+  cancelDiagnostic(reportId: string): void {
+    if (this.diagnosticDraft?.reportId !== reportId || this.diagnosticPhase === 'sending') return;
+    this.clearDiagnosticDraft();
+    this.emit();
+  }
+
+  async submitDiagnostic(reportId: string): Promise<void> {
+    const report: DiagnosticReport | undefined = this.diagnosticDraft;
+    if (report === undefined || report.reportId !== reportId || !this.diagnosticMatches(report) ||
+      (this.diagnosticPhase !== 'preview' && this.diagnosticPhase !== 'failed')) return;
+    const lifecycle: number = this.lifecycle, syncEpoch: number = this.syncEpoch;
+    const attempt: number = ++this.diagnosticAttempt;
+    this.diagnosticPhase = 'sending';
+    this.diagnosticError = '';
+    try {
+      const pending: Promise<ApiReply> = this.authRequest('/api/diagnostics', http.RequestMethod.POST,
+        JSON.stringify(report), lifecycle, syncEpoch);
+      this.emit();
+      const reply: ApiReply = await pending;
+      if (!this.syncLive(lifecycle, syncEpoch) || attempt !== this.diagnosticAttempt) return;
+      if (reply.reportId !== report.reportId) throw new Error('报告编号不匹配');
+      this.diagnosticPhase = 'sent';
+      this.diagnosticText = '';
+    } catch (error) {
+      if (!this.syncLive(lifecycle, syncEpoch) || attempt !== this.diagnosticAttempt) return;
+      this.diagnosticPhase = 'failed';
+      this.diagnosticError = error instanceof ApiFailure && error.status === 429 ?
+        '上传次数已达上限，请稍后重试。' : '暂未收到上传回执，可重试同一份日志。';
+    }
+    this.emit();
+  }
+
+  private clearDiagnosticDraft(): void {
+    this.diagnosticAttempt++;
+    this.diagnosticDraft = undefined;
+    this.diagnosticText = '';
+    this.diagnosticError = '';
+    this.diagnosticPhase = '';
+  }
+
+  private clearAccountDiagnostics(): void {
+    this.clearDiagnosticDraft();
+    this.failedTranscriptAt = -1;
+    this.transcriptDiagnostics.clear();
+    this.player.clearDiagnosticReports();
+  }
+
   private readingRemoved(error: Error, mediaId: string): boolean {
     if (error instanceof ApiFailure && error.status === 404 && this.readingItem?.mediaVersionId === mediaId) {
       this.returnToCurrent('这期资料已删除，已返回当前节目');
@@ -869,6 +978,7 @@ export class AccountSync {
       }
       if (changed || retry) this.transcriptPrevious = [];
       this.transcriptIdentity = identity;
+      this.failedTranscriptAt = job?.status === 'failed' ? Date.parse(job.updatedAt) : -1;
       // Keep displayed sentences and their watermark together while later chunks arrive.
       if (this.selectedAnchor === null) { this.transcriptJob = job; this.transcriptSegments = (reply.segments as TranscriptSegment[]).slice(); }
       this.transcriptPageCursor = reply.pageCursor as number;
@@ -918,6 +1028,8 @@ export class AccountSync {
     void this.refreshTranscript();
   }
   private clearTranscript(): void {
+    this.failedTranscriptAt = -1;
+    if (this.diagnosticDraft?.kind === 'transcription') this.clearDiagnosticDraft();
     this.clearChapters();
     this.clearSummaries();
     this.clearSelection(); this.clearSearch();
@@ -1803,6 +1915,8 @@ export class AccountSync {
         }
       }
       this.libraryItems = items;
+      if (this.ownsPlayback() && items.some((item: LibraryItem) =>
+        item.mediaVersionId === this.snapshot?.mediaVersionId && item.audioAvailable === false)) this.dropControl();
       this.libraryUsage = usage ?? null;
       this.importJobs = (replies[1].jobs as ImportJob[]).slice(0, 100);
       if (this.readingItem !== null) {
@@ -1920,6 +2034,7 @@ export class AccountSync {
 
   private installProfile(reply: ApiReply, token: string, base: string): void {
     this.validateProfile(reply);
+    this.clearAccountDiagnostics();
     this.profile = reply.session;
     this.accountEmail = (reply.user as AccountUser).email;
     this.token = token;
@@ -1961,6 +2076,7 @@ export class AccountSync {
     // Keep the account alive but invalidate every request belonging to the old history.
     const previousEpoch: number = this.syncEpoch;
     this.syncEpoch++;
+    this.clearDiagnosticDraft();
     this.replayChanging = false; this.replayPoint = null; this.pendingReplayPoint = null;
     this.savedMutationBusy = false; this.savedEpoch++; this.savedBusy = false;
     this.cancelSyncRequests();
@@ -2187,6 +2303,7 @@ export class AccountSync {
   }
 
   private clearAccount(): void {
+    this.clearAccountDiagnostics();
     this.replayChanging = false;
     this.savedMutationBusy = false; this.savedMediaId = ''; this.savedEditingId = ''; this.savedEditingMediaId = '';
     this.readingIntentEpoch++;
@@ -2266,10 +2383,14 @@ export class AccountSync {
       this.snapshot.ownerSessionId === this.profile.id && this.snapshot.playbackSessionId !== null;
   }
   private mayControl(): boolean {
+    return this.player.getSnapshot().ready && this.controlsCurrentMedia();
+  }
+
+  private controlsCurrentMedia(): boolean {
     const local: PlaybackViewState = this.player.getSnapshot();
-    return local.ready && (this.profile === undefined ? local.mediaVersionId === 'fixture-pcm-v1' :
+    return this.profile === undefined ? local.mediaVersionId === 'fixture-pcm-v1' :
       this.ownsPlayback() && !this.aligning && local.mediaVersionId === this.snapshot?.mediaVersionId &&
-      this.libraryItems.find((item: LibraryItem) => item.mediaVersionId === local.mediaVersionId)?.audioAvailable !== false);
+      this.libraryItems.find((item: LibraryItem) => item.mediaVersionId === local.mediaVersionId)?.audioAvailable !== false;
   }
   private live(lifecycle: number): boolean { return this.initialized && lifecycle === this.lifecycle; }
   private syncLive(lifecycle: number, syncEpoch: number): boolean {
@@ -2279,7 +2400,8 @@ export class AccountSync {
     if (!this.live(lifecycle) || !this.ownsPlayback() || epoch !== this.controlEpoch) throw new Error('播放设备已发生变化');
   }
   private updateNetworkPolicy(): void {
-    this.stream.setForeground(this.foreground || (this.ownsPlayback() && this.lastPlayer.playerState === 'playing'));
+    this.stream.setForeground(this.foreground ||
+      (this.ownsPlayback() && (this.lastPlayer.playerState === 'playing' || this.lastPlayer.recovering === true)));
   }
   private reportState(state: PlaybackViewState): string {
     if (state.buffering && state.playerState === 'playing') return 'buffering';
@@ -2333,6 +2455,7 @@ export class AccountSync {
     }
   }
   private emit(): void {
+    if (this.diagnosticDraft !== undefined && !this.diagnosticMatches(this.diagnosticDraft)) this.clearDiagnosticDraft();
     const snapshot: AccountViewState = this.getSnapshot();
     for (const listener of this.listeners) listener(snapshot);
   }

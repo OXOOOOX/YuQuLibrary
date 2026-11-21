@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type TouchEvent } from 'react';
 import { PLAYBACK_FIXTURE } from '@yuqu/contracts';
 import { ConnectionProbe } from './connection-probe';
 import { RequestError, usePlaybackSession } from './use-playback-session';
@@ -94,6 +94,7 @@ export function PlaybackCheck() {
   const [selection, setSelection] = useState<{ mediaVersionId: string; sessionId: string; value: QuestionSelection } | null>(null);
   const [location, setLocation] = useState<SourceLocation | null>(null);
   const [savedRevision, setSavedRevision] = useState(0);
+  const backSwipe = useRef<{ id: number; x: number; y: number; started: number; moving: boolean } | null>(null);
   useEffect(() => { setReader(null); setSelection(null); setLocation(null); setSection('listen'); setLibraryView('items'); }, [session.account?.session.id]);
   const reading = reader?.sessionId === session.account?.session.id ? reader : null;
   const documentId = reading?.id ?? session.snapshot?.mediaVersionId;
@@ -102,9 +103,34 @@ export function PlaybackCheck() {
   const positionAvailable = sameMedia && !session.stale && !session.busy && !!session.snapshot;
   const documentAudio = reading?.audioAvailable ?? true;
   const openSection = (next: typeof section) => {
+    backSwipe.current = null;
     setSection(next);
     window.scrollTo(0, 0);
   };
+  function startBackSwipe(event: TouchEvent<HTMLElement>) {
+    backSwipe.current = null;
+    if (!session.account || section !== 'listen' || settingsOpen || event.touches.length !== 1 ||
+      !window.matchMedia('(max-width: 600px)').matches) return;
+    const target = event.target as Element;
+    if (target.closest('nav, form, input, select, textarea, label, a, summary, button:not(.sentence-action), [contenteditable="true"]') ||
+      event.currentTarget.querySelector('.transcript-segments .selected-segment')) return;
+    const touch = event.touches[0];
+    backSwipe.current = { id: touch.identifier, x: touch.clientX, y: touch.clientY, started: event.timeStamp, moving: false };
+  }
+  function trackBackSwipe(event: TouchEvent<HTMLElement>, ended = false) {
+    const start = backSwipe.current;
+    if (!start || event.timeStamp < start.started) return;
+    const touch = event.changedTouches[0];
+    const left = start.x - touch.clientX, vertical = Math.abs(start.y - touch.clientY);
+    // Yield to vertical reading, multitouch and the sentence's 430 ms long press.
+    if (touch.identifier !== start.id || event.touches.length > (ended ? 0 : 1) ||
+      (!start.moving && event.timeStamp - start.started >= 430) || left < -12 || (vertical > 10 && vertical >= Math.abs(left))) {
+      backSwipe.current = null; return;
+    }
+    if (!ended) { if (left > 12) start.moving = true; return; }
+    backSwipe.current = null;
+    if (left >= 64 && left > vertical * 1.4) { setLibraryView('items'); openSection('library'); }
+  }
   const pinDocument = () => {
     if (!documentId || !session.account) return;
     setReader(previous => previous?.id === documentId && previous.sessionId === session.account!.session.id ? previous : {
@@ -118,7 +144,9 @@ export function PlaybackCheck() {
   };
   const primaryLabel = session.account ? session.own && view.playing ? '暂停' : '在此设备播放' : view.playing ? '暂停' : '播放';
 
-  return <main className={session.account ? 'with-primary-nav' : undefined}>
+  return <main className={session.account ? 'with-primary-nav' : undefined}
+    onTouchStart={startBackSwipe} onTouchMove={event => trackBackSwipe(event)}
+    onTouchEnd={event => trackBackSwipe(event, true)} onTouchCancel={() => { backSwipe.current = null; }}>
     <header><span className="brand">鱼趣知识库</span>
       {session.account ? <div className="account-identity"><span title={session.account.user.email}>{session.account.user.email}</span>
         <button className="text-button" onClick={() => { void session.logout(); }} disabled={session.busy}>退出</button></div> : <span className="muted">{session.loading ? '正在恢复登录…' : '本地试听'}</span>}

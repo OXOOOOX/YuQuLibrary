@@ -8,7 +8,7 @@ import { SummariesPanel } from './summaries-panel';
 import { TranscriptSentences } from './transcript-sentences';
 
 const labels = { queued: '等待转写', processing: '正在转写', ready: '整期文稿已完成', failed: '转写暂未完成' };
-const readingControls = '.search-form, .chapters-collapsed, .chapters-panel, .summaries-collapsed, .summaries-panel';
+const readingControls = '.search-form, .chapters-collapsed, .chapters-panel, .summaries-collapsed, .summaries-panel, .sentence-action';
 interface FrozenSelection { source: TranscriptSelectionSource; segments: TranscriptSegment[]; page: TranscriptPage; first: number; last: number }
 function highlight(text: string, ranges: { start: number; end: number }[]): ReactNode[] {
   const result: ReactNode[] = []; let previous = 0;
@@ -58,6 +58,7 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
   function pauseFollow() { followIntent.current++; setFollowing(false); setLocatePaused(false); }
   function resumeFollow() {
     followIntent.current++;
+    searchRequest.current?.abort(); setSearching(false); focusPending.current = false; restoreResult.current = false;
     setFollowing(true); setLocatePaused(true); setSelection(null); setContextHit(null); setChapterContext(null); setSearch(null);
   }
   async function playSentence(ms: number) {
@@ -199,14 +200,16 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
   ) ? chunk : null;
   const lastPosition = useRef(positionMs);
   useEffect(() => { lastPosition.current = positionMs; }, [positionMs]);
+  useEffect(() => { if (!active) followIntent.current++; }, [active]);
   useEffect(() => {
     if (missingPage === null) return;
     const controller = new AbortController();
+    const intent = followIntent.current;
     let retry: ReturnType<typeof setTimeout> | undefined;
     async function load() {
       try {
         const result = await knowledgeApi<TranscriptPage>(`/api/media/${encodeURIComponent(mediaVersionId)}/transcript?at=${lastPosition.current}`, { signal: controller.signal });
-        if (controller.signal.aborted || result.mediaVersionId !== mediaVersionId) return;
+        if (controller.signal.aborted || followIntent.current !== intent || result.mediaVersionId !== mediaVersionId) return;
         activeRequest.current?.abort(); activeRequest.current = null;
         setAtMs(null); setCursor(result.pageCursor); setPrevious([]); setPage(result); setError('');
       } catch {
@@ -252,7 +255,7 @@ export function TranscriptPanel({ mediaVersionId, positionMs, positionAvailable,
   }, [active, following]);
   return <section className="transcript-panel" aria-label="文稿与搜索"
     onFocusCapture={event => { if (event.target.closest(readingControls)) pauseFollow(); }}
-    onPointerDownCapture={event => { if ((event.target as Element).closest(`${readingControls}, .sentence-action`)) pauseFollow(); }}>
+    onPointerDownCapture={event => { if ((event.target as Element).closest(readingControls)) pauseFollow(); }}>
     <div className="transcript-content">
     <div className="transcript-heading"><p role="status" data-testid="transcript-status">{page ? job ? labels[job.status] : '验证音频不提供文稿' : '正在读取文稿…'}</p>
       <button className="text-button" disabled={!audioAvailable || !positionAvailable} aria-pressed={following && audioAvailable && positionAvailable}
